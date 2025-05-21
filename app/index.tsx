@@ -1,8 +1,9 @@
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Picker } from "@react-native-picker/picker";
-import React, { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
+  AppState,
   Image,
   KeyboardAvoidingView,
   Modal,
@@ -15,6 +16,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import { BleManager } from "react-native-ble-plx";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 const TAGS = [
@@ -25,13 +27,19 @@ const TAGS = [
 
 const STORAGE_KEY = "@searchit_objects";
 const SETUP_DONE_KEY = "@searchit_setup_done";
+const BLE_DEVICE_NAME = "ESP32-Locator";
+const SERVICE_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
 
-// Demo RSSI and signal info (replace with real logic later)
-const SIGNALS = [
-  { rssi: -31, label: "very near", color: "#247eff", icon: "cellular" },
-  { rssi: -67, label: "far", color: "#ffbb00", icon: "cellular-outline" },
-  { rssi: null, label: "n/a", color: "red", icon: "warning" },
-];
+// ICONS for signal
+const getSignalIcon = (rssi: number | null) => {
+  if (rssi === null)
+    return { icon: "warning-outline", color: "#666", label: "n/a" };
+  if (rssi >= -40)
+    return { icon: "cellular", color: "#247eff", label: "very near" };
+  if (rssi >= -60)
+    return { icon: "cellular-outline", color: "#ffbb00", label: "far" };
+  return { icon: "cellular-outline", color: "#ffbb00", label: "far" };
+};
 
 export default function HomeScreen() {
   const [showForm, setShowForm] = useState(false);
@@ -47,6 +55,12 @@ export default function HomeScreen() {
   const [modalMsg, setModalMsg] = useState("");
   const [errors, setErrors] = useState<{ [key: string]: string }>({});
   const [setupDone, setSetupDone] = useState(false);
+
+  // BLE State
+  const [rssiMap, setRssiMap] = useState<{ [tag: string]: number | null }>({});
+  const bleManager = useRef<BleManager | null>(null);
+  const scanSubscription = useRef<any>(null);
+  const appState = useRef(AppState.currentState);
 
   // Load objects and setup-done status on mount
   useEffect(() => {
@@ -65,6 +79,72 @@ export default function HomeScreen() {
       setSetupDone(true);
     }
   }, [objects, setupDone]);
+
+  // BLE Scan logic - runs only on objects screen
+  useEffect(() => {
+    if (!setupDone || objects.length < 3) return;
+
+    bleManager.current = new BleManager();
+
+    let isCancelled = false;
+    let lastSeenMap: { [id: string]: number } = {};
+
+    const startScan = () => {
+      // Reset RSSI map every scan start
+      setRssiMap({});
+      scanSubscription.current = bleManager.current!.startDeviceScan(
+        null,
+        { allowDuplicates: true },
+        (error, device) => {
+          if (error) {
+            // Optionally show error
+            return;
+          }
+          if (!device) return;
+          // Match by name and advertised service UUID (if needed)
+          const devName = device.name || device.localName;
+          if (devName === BLE_DEVICE_NAME) {
+            // Assign RSSI to the first tag that doesn't already have a "recent" value
+            // (so if multiple ESP32-Locator are on, assign by order)
+            let tagIdx = 0;
+            for (; tagIdx < objects.length; tagIdx++) {
+              // If this tag does not already have an RSSI, assign
+              if (!rssiMap[objects[tagIdx].tag]) break;
+            }
+            if (tagIdx < objects.length) {
+              // Mark this tag as "seen", set RSSI
+              lastSeenMap[device.id] = Date.now();
+              setRssiMap((prev) => ({
+                ...prev,
+                [objects[tagIdx].tag]: device.rssi,
+              }));
+            }
+          }
+        }
+      );
+    };
+
+    startScan();
+
+    // Clean-up: stop scan and destroy manager on unmount/app-background
+    const handleAppStateChange = (nextAppState: string) => {
+      if (nextAppState === "active") {
+        startScan();
+      } else if (nextAppState.match(/inactive|background/)) {
+        scanSubscription.current && scanSubscription.current.remove();
+      }
+    };
+    const appStateSubscription = AppState.addEventListener(
+      "change",
+      handleAppStateChange
+    );
+
+    return () => {
+      scanSubscription.current && scanSubscription.current.remove();
+      bleManager.current && bleManager.current.destroy();
+      appStateSubscription && appStateSubscription.remove();
+    };
+  }, [setupDone, objects.length]);
 
   // Only show add-object workflow if setup is not done or less than 3 objects exist
   if (!setupDone || objects.length < 3) {
@@ -314,7 +394,9 @@ export default function HomeScreen() {
         <Text style={styles.selectLabel}>Select Object</Text>
         <View style={styles.objectListWrapper}>
           {objects.map((obj, idx) => {
-            const signal = SIGNALS[idx] || SIGNALS[2];
+            // Use RSSI from BLE scan, or null if not detected
+            const rssi = obj.tag in rssiMap ? rssiMap[obj.tag] : null;
+            const signal = getSignalIcon(rssi);
             return (
               <View style={styles.objectItem} key={obj.tag}>
                 <View style={{ flex: 1 }}>
@@ -326,19 +408,19 @@ export default function HomeScreen() {
                     style={[
                       styles.signalValue,
                       { color: signal.color },
-                      signal.rssi === null && { color: "#666" },
+                      rssi === null && { color: "#666" },
                     ]}
                   >
-                    {signal.rssi !== null ? `${signal.rssi}` : "n/a"}
+                    {rssi !== null ? `${rssi}` : "n/a"}
                   </Text>
                   <Text
                     style={[
                       styles.signalLabel,
                       { color: signal.color },
-                      signal.rssi === null && { color: "#666" },
+                      rssi === null && { color: "#666" },
                     ]}
                   >
-                    {signal.rssi !== null ? `(${signal.label})` : ""}
+                    {rssi !== null ? `(${signal.label})` : ""}
                   </Text>
                 </View>
                 <Ionicons
