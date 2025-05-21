@@ -97,15 +97,22 @@ export default function HomeScreen() {
         { allowDuplicates: true },
         (error, device) => {
           if (error) {
-            // Optionally show error
+            console.warn("BLE scan error:", error);
             return;
           }
           if (!device) return;
-          // Match by name and advertised service UUID (if needed)
+          // Debug: Log all found devices
+          console.log(
+            "Found device:",
+            device.name,
+            device.localName,
+            device.id,
+            device.rssi
+          );
+          // Loosen name check for debugging
           const devName = device.name || device.localName;
-          if (devName === BLE_DEVICE_NAME) {
+          if (devName && devName.includes("ESP32")) {
             // Assign RSSI to the first tag that doesn't already have a "recent" value
-            // (so if multiple ESP32-Locator are on, assign by order)
             let tagIdx = 0;
             for (; tagIdx < objects.length; tagIdx++) {
               // If this tag does not already have an RSSI, assign

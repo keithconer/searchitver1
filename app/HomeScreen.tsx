@@ -1,17 +1,24 @@
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Picker } from "@react-native-picker/picker";
-import React, { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
+  Alert,
+  AppState,
   Image,
+  KeyboardAvoidingView,
   Modal,
+  PermissionsAndroid,
+  Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
   View,
 } from "react-native";
+import { BleManager } from "react-native-ble-plx";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 const TAGS = [
@@ -21,6 +28,56 @@ const TAGS = [
 ];
 
 const STORAGE_KEY = "@searchit_objects";
+const SETUP_DONE_KEY = "@searchit_setup_done";
+
+// ICONS for signal
+const getSignalIcon = (rssi: number | null) => {
+  if (rssi === null)
+    return { icon: "warning-outline", color: "#666", label: "n/a" };
+  if (rssi >= -40)
+    return { icon: "cellular", color: "#247eff", label: "very near" };
+  if (rssi >= -60)
+    return { icon: "cellular-outline", color: "#ffbb00", label: "far" };
+  return { icon: "cellular-outline", color: "#ffbb00", label: "far" };
+};
+
+// Request BLE and location permissions (Android 12+)
+async function requestBlePermissions(): Promise<boolean> {
+  if (Platform.OS === "android" && Platform.Version >= 23) {
+    const permissions = [
+      PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+      PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+      PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+    ];
+    const rationale = {
+      title: "Bluetooth & Location Permissions Required",
+      message:
+        "This app needs Bluetooth and Location permissions to scan for BLE devices.",
+      buttonPositive: "OK",
+    };
+    try {
+      const granted = await PermissionsAndroid.requestMultiple(permissions);
+      const allGranted = permissions.every(
+        (perm) => granted[perm] === PermissionsAndroid.RESULTS.GRANTED
+      );
+      if (!allGranted) {
+        Alert.alert(
+          "Permissions Required",
+          "Bluetooth and Location permissions are needed for BLE scanning. Please enable them in your phone settings."
+        );
+        return false;
+      }
+      return true;
+    } catch (err) {
+      Alert.alert(
+        "Permission Error",
+        "Could not request Bluetooth/Location permissions."
+      );
+      return false;
+    }
+  }
+  return true; // iOS: handled in Info.plist
+}
 
 export default function HomeScreen() {
   const [showForm, setShowForm] = useState(false);
@@ -35,235 +92,412 @@ export default function HomeScreen() {
   const [modalVisible, setModalVisible] = useState(false);
   const [modalMsg, setModalMsg] = useState("");
   const [errors, setErrors] = useState<{ [key: string]: string }>({});
+  const [setupDone, setSetupDone] = useState(false);
 
-  // Load saved objects from AsyncStorage on mount
+  // BLE State
+  const [rssiMap, setRssiMap] = useState<{ [tag: string]: number | null }>({});
+  const bleManager = useRef<BleManager | null>(null);
+  const appState = useRef(AppState.currentState);
+
+  // Request permissions once, before any BLE activity
+  useEffect(() => {
+    (async () => {
+      await requestBlePermissions();
+    })();
+  }, []);
+
+  // Load objects and setup-done status on mount
   useEffect(() => {
     (async () => {
       const data = await AsyncStorage.getItem(STORAGE_KEY);
       if (data) setObjects(JSON.parse(data));
+      const done = await AsyncStorage.getItem(SETUP_DONE_KEY);
+      setSetupDone(!!done);
     })();
   }, []);
 
-  // Dynamically filter available tags (exclude already-assigned ones)
-  const availableTags = TAGS.filter(
-    (tag) => !objects.find((obj) => obj.tag === tag.value)
-  );
+  useEffect(() => {
+    // If objects are 3, set setup as done (one-time)
+    if (objects.length === 3 && !setupDone) {
+      AsyncStorage.setItem(SETUP_DONE_KEY, "true");
+      setSetupDone(true);
+    }
+  }, [objects, setupDone]);
 
-  // Form validation logic
-  const validate = () => {
-    let err: { [key: string]: string } = {};
-    if (!name.trim()) err.name = "Object name is required";
-    if (!selectedTag) err.tag = "Tag is required";
-    if (!password) err.password = "Password is required";
-    if (password.length < 1 || password.length > 6)
-      err.password = "Password must be 1-6 characters";
-    if (!confirm) err.confirm = "Confirm password is required";
-    if (confirm !== password) err.confirm = "Passwords do not match";
-    return err;
-  };
+  // BLE Scan logic - runs only on objects screen
+  useEffect(() => {
+    if (!setupDone || objects.length < 3) return;
 
-  // Handle confirm object
-  const onConfirm = async () => {
-    const err = validate();
-    setErrors(err);
-    if (Object.keys(err).length > 0) return;
+    let isMounted = true;
+    bleManager.current = new BleManager();
 
-    const obj = {
-      name: name.trim(),
-      description: description.trim(),
-      tag: selectedTag,
-      password,
+    let lastSeenMap: { [id: string]: number } = {};
+
+    async function startBleScan() {
+      const perms = await requestBlePermissions();
+      if (!perms) return;
+
+      setRssiMap({});
+      bleManager.current!.startDeviceScan(
+        null,
+        { allowDuplicates: true },
+        (error, device) => {
+          if (error) {
+            console.warn("BLE scan error:", error);
+            return;
+          }
+          if (!device) return;
+          // Debug: Log all found devices
+          console.log(
+            "Found device:",
+            device.name,
+            device.localName,
+            device.id,
+            device.rssi
+          );
+          // Loosen name check for debugging
+          const devName = device.name || device.localName;
+          if (devName && devName.includes("ESP32")) {
+            // Assign RSSI to the first tag that doesn't already have a value
+            let tagIdx = 0;
+            for (; tagIdx < objects.length; tagIdx++) {
+              if (!rssiMap[objects[tagIdx].tag]) break;
+            }
+            if (tagIdx < objects.length) {
+              lastSeenMap[device.id] = Date.now();
+              setRssiMap((prev) => ({
+                ...prev,
+                [objects[tagIdx].tag]: device.rssi,
+              }));
+            }
+          }
+        }
+      );
+    }
+
+    startBleScan();
+
+    // Clean-up: stop scan and destroy manager on unmount/app-background
+    const handleAppStateChange = (nextAppState: string) => {
+      if (nextAppState === "active") {
+        startBleScan();
+      } else if (nextAppState.match(/inactive|background/)) {
+        bleManager.current && bleManager.current.stopDeviceScan();
+      }
     };
-    const updated = [...objects, obj];
-    setObjects(updated);
-    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-    setModalMsg("Object added successfully!");
-    setModalVisible(true);
-    setName("");
-    setDescription("");
-    setSelectedTag(null);
-    setPassword("");
-    setConfirm("");
-    setTimeout(() => setModalVisible(false), 1800);
-  };
+    const appStateSubscription = AppState.addEventListener(
+      "change",
+      handleAppStateChange
+    );
 
-  // Handle showing the form and clearing errors/input
-  const handleShowForm = () => {
-    setShowForm(true);
-    setErrors({});
-    setName("");
-    setDescription("");
-    setSelectedTag(null);
-    setPassword("");
-    setConfirm("");
-  };
+    return () => {
+      bleManager.current && bleManager.current.stopDeviceScan();
+      bleManager.current && bleManager.current.destroy();
+      appStateSubscription && appStateSubscription.remove();
+      isMounted = false;
+    };
+  }, [setupDone, objects.length]);
 
+  // Only show add-object workflow if setup is not done or less than 3 objects exist
+  if (!setupDone || objects.length < 3) {
+    const availableTags = TAGS.filter(
+      (tag) => !objects.find((obj) => obj.tag === tag.value)
+    );
+
+    const validate = () => {
+      let err: { [key: string]: string } = {};
+      if (!name.trim()) err.name = "Object name is required";
+      if (!selectedTag) err.tag = "Tag is required";
+      if (!password) err.password = "Password is required";
+      if (password.length < 1 || password.length > 6)
+        err.password = "Password must be 1-6 characters";
+      if (!confirm) err.confirm = "Confirm password is required";
+      if (confirm !== password) err.confirm = "Passwords do not match";
+      return err;
+    };
+
+    const onConfirm = async () => {
+      const err = validate();
+      setErrors(err);
+      if (Object.keys(err).length > 0) return;
+
+      const obj = {
+        name: name.trim(),
+        description: description.trim(),
+        tag: selectedTag,
+        password,
+      };
+      const updated = [...objects, obj];
+      setObjects(updated);
+      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+      setModalMsg("Object added successfully!");
+      setModalVisible(true);
+      setName("");
+      setDescription("");
+      setSelectedTag(null);
+      setPassword("");
+      setConfirm("");
+      setTimeout(() => setModalVisible(false), 1800);
+    };
+
+    const handleShowForm = () => {
+      setShowForm(true);
+      setErrors({});
+      setName("");
+      setDescription("");
+      setSelectedTag(null);
+      setPassword("");
+      setConfirm("");
+    };
+
+    return (
+      <SafeAreaView style={styles.container}>
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
+          keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 20}
+        >
+          <ScrollView
+            contentContainerStyle={{ flexGrow: 1 }}
+            keyboardShouldPersistTaps="handled"
+          >
+            {!showForm ? (
+              <View style={styles.centered}>
+                <Image
+                  source={require("@/assets/imgs/logo.png")}
+                  style={styles.logo}
+                />
+                <Text style={styles.heading}>search it.</Text>
+                <Text style={styles.subheading}>
+                  You can add 3 specific objects to monitor
+                </Text>
+                <TouchableOpacity
+                  style={styles.addButton}
+                  onPress={handleShowForm}
+                  disabled={objects.length >= 3}
+                >
+                  <Text style={styles.addButtonText}>+ Add Object</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <View style={styles.formContainer}>
+                <Text style={styles.title}>
+                  Add Object ({objects.length}/3)
+                </Text>
+
+                <Text style={styles.label}>
+                  Object name <Text style={{ color: "red" }}>*</Text>
+                </Text>
+                <TextInput
+                  placeholder="Wallet"
+                  style={[
+                    styles.input,
+                    errors.name && { borderColor: "red", borderWidth: 1 },
+                  ]}
+                  value={name}
+                  onChangeText={setName}
+                />
+                {errors.name && <Text style={styles.err}>{errors.name}</Text>}
+
+                <Text style={styles.label}>Description</Text>
+                <TextInput
+                  placeholder="Write a very short description where you usually place this object."
+                  multiline
+                  style={[styles.input, { height: 60 }]}
+                  value={description}
+                  onChangeText={setDescription}
+                />
+
+                <Text style={styles.label}>
+                  Assign Tag <Text style={{ color: "red" }}>*</Text>
+                </Text>
+                <View
+                  style={[
+                    styles.pickerWrapper,
+                    errors.tag && { borderColor: "red", borderWidth: 1 },
+                  ]}
+                >
+                  <Picker
+                    selectedValue={selectedTag}
+                    onValueChange={(itemValue) => setSelectedTag(itemValue)}
+                    style={styles.picker}
+                    enabled={availableTags.length > 0}
+                  >
+                    <Picker.Item label="Select tag..." value={null} />
+                    {availableTags.map((tag) => (
+                      <Picker.Item
+                        key={tag.value}
+                        label={tag.label}
+                        value={tag.value}
+                      />
+                    ))}
+                  </Picker>
+                </View>
+                {errors.tag && <Text style={styles.err}>{errors.tag}</Text>}
+
+                <Text style={styles.label}>
+                  Set Password <Text style={{ color: "red" }}>*</Text>
+                </Text>
+                <View
+                  style={[
+                    styles.passwordField,
+                    errors.password && { borderColor: "red", borderWidth: 1 },
+                  ]}
+                >
+                  <Pressable onPress={() => setPasswordVisible((v) => !v)}>
+                    <Ionicons
+                      name={passwordVisible ? "eye" : "eye-off"}
+                      size={18}
+                      color="#999"
+                    />
+                  </Pressable>
+                  <TextInput
+                    placeholder="(maximum of 6 characters)"
+                    maxLength={6}
+                    secureTextEntry={!passwordVisible}
+                    style={styles.passwordInput}
+                    value={password}
+                    onChangeText={setPassword}
+                  />
+                </View>
+                {errors.password && (
+                  <Text style={styles.err}>{errors.password}</Text>
+                )}
+
+                <Text style={styles.label}>
+                  Confirm Password <Text style={{ color: "red" }}>*</Text>
+                </Text>
+                <View
+                  style={[
+                    styles.passwordField,
+                    errors.confirm && { borderColor: "red", borderWidth: 1 },
+                  ]}
+                >
+                  <Pressable
+                    onPress={() => setConfirmPasswordVisible((v) => !v)}
+                    disabled={password.length === 0}
+                  >
+                    <Ionicons
+                      name={confirmPasswordVisible ? "eye" : "eye-off"}
+                      size={18}
+                      color={password.length === 0 ? "#ccc" : "#999"}
+                    />
+                  </Pressable>
+                  <TextInput
+                    placeholder=""
+                    secureTextEntry={!confirmPasswordVisible}
+                    style={styles.passwordInput}
+                    value={confirm}
+                    onChangeText={setConfirm}
+                    editable={password.length > 0}
+                  />
+                </View>
+                {errors.confirm && (
+                  <Text style={styles.err}>{errors.confirm}</Text>
+                )}
+
+                <TouchableOpacity
+                  style={[
+                    styles.confirmButton,
+                    objects.length >= 3 && { backgroundColor: "#ccc" },
+                  ]}
+                  onPress={onConfirm}
+                  disabled={objects.length >= 3}
+                >
+                  <Text style={styles.confirmButtonText}>✔ Confirm Object</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+            <View style={{ height: 20 }} /> {/* Spacer for keyboard */}
+          </ScrollView>
+          <Text style={styles.footer}>
+            Search It, 2025. All Rights Reserved.
+          </Text>
+        </KeyboardAvoidingView>
+
+        <Modal
+          visible={modalVisible}
+          transparent={true}
+          animationType="fade"
+          onRequestClose={() => setModalVisible(false)}
+        >
+          <View style={styles.modalBg}>
+            <View style={styles.modalContent}>
+              <Ionicons name="checkmark-circle" size={48} color="#247eff" />
+              <Text style={styles.modalText}>{modalMsg}</Text>
+            </View>
+          </View>
+        </Modal>
+      </SafeAreaView>
+    );
+  }
+
+  // --- EXISTING OBJECTS LIST SCREEN (Landing page after setup) ---
   return (
-    <SafeAreaView style={styles.container}>
-      {!showForm ? (
-        <View style={styles.centered}>
+    <SafeAreaView style={styles.containerNoPad}>
+      <ScrollView contentContainerStyle={{ flexGrow: 1 }}>
+        <View style={styles.centeredTop}>
           <Image
             source={require("@/assets/imgs/logo.png")}
             style={styles.logo}
           />
           <Text style={styles.heading}>search it.</Text>
-          <Text style={styles.subheading}>
-            You can add 3 specific objects to monitor
-          </Text>
-          <TouchableOpacity
-            style={styles.addButton}
-            onPress={handleShowForm}
-            disabled={objects.length >= 3}
-          >
-            <Text style={styles.addButtonText}>+ Add Object</Text>
-          </TouchableOpacity>
         </View>
-      ) : (
-        <View style={styles.formContainer}>
-          <Text style={styles.title}>Add Object ({objects.length}/3)</Text>
-
-          <Text style={styles.label}>
-            Object name <Text style={{ color: "red" }}>*</Text>
-          </Text>
-          <TextInput
-            placeholder="Wallet"
-            style={[
-              styles.input,
-              errors.name && { borderColor: "red", borderWidth: 1 },
-            ]}
-            value={name}
-            onChangeText={setName}
-          />
-          {errors.name && <Text style={styles.err}>{errors.name}</Text>}
-
-          <Text style={styles.label}>Description</Text>
-          <TextInput
-            placeholder="Write a very short description where you usually place this object."
-            multiline
-            style={[styles.input, { height: 60 }]}
-            value={description}
-            onChangeText={setDescription}
-          />
-
-          <Text style={styles.label}>
-            Assign Tag <Text style={{ color: "red" }}>*</Text>
-          </Text>
-          <View
-            style={[
-              styles.pickerWrapper,
-              errors.tag && { borderColor: "red", borderWidth: 1 },
-            ]}
-          >
-            <Picker
-              selectedValue={selectedTag}
-              onValueChange={(itemValue) => setSelectedTag(itemValue)}
-              style={styles.picker}
-              enabled={availableTags.length > 0}
-            >
-              <Picker.Item label="Select tag..." value={null} />
-              {availableTags.map((tag) => (
-                <Picker.Item
-                  key={tag.value}
-                  label={tag.label}
-                  value={tag.value}
+        <Text style={styles.selectLabel}>Select Object</Text>
+        <View style={styles.objectListWrapper}>
+          {objects.map((obj, idx) => {
+            // Use RSSI from BLE scan, or null if not detected
+            const rssi = obj.tag in rssiMap ? rssiMap[obj.tag] : null;
+            const signal = getSignalIcon(rssi);
+            return (
+              <View style={styles.objectItem} key={obj.tag}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.objectName}>{obj.name}</Text>
+                  <Text style={styles.objectDesc}>{obj.description}</Text>
+                </View>
+                <View style={styles.signalSection}>
+                  <Text
+                    style={[
+                      styles.signalValue,
+                      { color: signal.color },
+                      rssi === null && { color: "#666" },
+                    ]}
+                  >
+                    {rssi !== null ? `${rssi}` : "n/a"}
+                  </Text>
+                  <Text
+                    style={[
+                      styles.signalLabel,
+                      { color: signal.color },
+                      rssi === null && { color: "#666" },
+                    ]}
+                  >
+                    {rssi !== null ? `(${signal.label})` : ""}
+                  </Text>
+                </View>
+                <Ionicons
+                  name={signal.icon as any}
+                  size={22}
+                  color={signal.color}
+                  style={{ marginHorizontal: 4 }}
                 />
-              ))}
-            </Picker>
-          </View>
-          {errors.tag && <Text style={styles.err}>{errors.tag}</Text>}
-
-          <Text style={styles.label}>
-            Set Password <Text style={{ color: "red" }}>*</Text>
-          </Text>
-          <View
-            style={[
-              styles.passwordField,
-              errors.password && { borderColor: "red", borderWidth: 1 },
-            ]}
-          >
-            <Pressable onPress={() => setPasswordVisible((v) => !v)}>
-              <Ionicons
-                name={passwordVisible ? "eye" : "eye-off"}
-                size={18}
-                color="#999"
-              />
-            </Pressable>
-            <TextInput
-              placeholder="(maximum of 6 characters)"
-              maxLength={6}
-              secureTextEntry={!passwordVisible}
-              style={styles.passwordInput}
-              value={password}
-              onChangeText={setPassword}
-            />
-          </View>
-          {errors.password && <Text style={styles.err}>{errors.password}</Text>}
-
-          <Text style={styles.label}>
-            Confirm Password <Text style={{ color: "red" }}>*</Text>
-          </Text>
-          <View
-            style={[
-              styles.passwordField,
-              errors.confirm && { borderColor: "red", borderWidth: 1 },
-            ]}
-          >
-            <Pressable
-              onPress={() => setConfirmPasswordVisible((v) => !v)}
-              disabled={password.length === 0}
-            >
-              <Ionicons
-                name={confirmPasswordVisible ? "eye" : "eye-off"}
-                size={18}
-                color={password.length === 0 ? "#ccc" : "#999"}
-              />
-            </Pressable>
-            <TextInput
-              placeholder=""
-              secureTextEntry={!confirmPasswordVisible}
-              style={styles.passwordInput}
-              value={confirm}
-              onChangeText={setConfirm}
-              editable={password.length > 0}
-            />
-          </View>
-          {errors.confirm && <Text style={styles.err}>{errors.confirm}</Text>}
-
-          <TouchableOpacity
-            style={[
-              styles.confirmButton,
-              objects.length >= 3 && { backgroundColor: "#ccc" },
-            ]}
-            onPress={onConfirm}
-            disabled={objects.length >= 3}
-          >
-            <Text style={styles.confirmButtonText}>✔ Confirm Object</Text>
-          </TouchableOpacity>
+                <Ionicons name="ellipsis-horizontal" size={22} color="#666" />
+              </View>
+            );
+          })}
         </View>
-      )}
-
-      <Modal
-        visible={modalVisible}
-        transparent={true}
-        animationType="fade"
-        onRequestClose={() => setModalVisible(false)}
-      >
-        <View style={styles.modalBg}>
-          <View style={styles.modalContent}>
-            <Ionicons name="checkmark-circle" size={48} color="#247eff" />
-            <Text style={styles.modalText}>{modalMsg}</Text>
-          </View>
-        </View>
-      </Modal>
-
-      <Text style={styles.footer}>Search It, 2025. All Rights Reserved.</Text>
+        <View style={{ flex: 1 }} />
+        <Text style={styles.footer}>Search It, 2025. All Rights Reserved.</Text>
+      </ScrollView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#fff", padding: 20 },
+  containerNoPad: { flex: 1, backgroundColor: "#fff" },
   centered: { flex: 1, justifyContent: "center", alignItems: "center" },
+  centeredTop: { alignItems: "center", marginTop: 36, marginBottom: 10 },
   logo: { width: 80, height: 80, resizeMode: "contain", marginBottom: 10 },
   heading: {
     fontSize: 32,
@@ -276,6 +510,53 @@ const styles = StyleSheet.create({
     color: "#333",
     marginBottom: 30,
     textAlign: "center",
+  },
+  selectLabel: {
+    fontSize: 17,
+    fontWeight: "500",
+    marginHorizontal: 30,
+    marginBottom: 6,
+    color: "#555",
+  },
+  objectListWrapper: {
+    backgroundColor: "#f8f6f5",
+    marginHorizontal: 0,
+    borderRadius: 6,
+    paddingVertical: 2,
+    marginBottom: 12,
+    borderColor: "#ececec",
+    borderWidth: 1,
+    elevation: 1,
+  },
+  objectItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 18,
+    paddingHorizontal: 24,
+    borderBottomColor: "#e0dede",
+    borderBottomWidth: 1,
+  },
+  objectName: {
+    fontWeight: "bold",
+    fontSize: 16,
+    color: "#222",
+  },
+  objectDesc: {
+    color: "#999",
+    fontSize: 14,
+    marginTop: 2,
+  },
+  signalSection: {
+    minWidth: 72,
+    alignItems: "flex-end",
+    marginRight: 10,
+  },
+  signalValue: {
+    fontWeight: "bold",
+    fontSize: 15,
+  },
+  signalLabel: {
+    fontSize: 13,
   },
   addButton: {
     backgroundColor: "#247eff",
