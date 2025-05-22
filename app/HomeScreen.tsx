@@ -28,12 +28,10 @@ const TAGS = [
   { label: "ESP32 CAM (Tag 3)", value: "tag3" },
 ];
 
-// Map tag values to expected device MAC address patterns
-// This helps identify which device corresponds to which tag
 const TAG_MAC_PATTERNS = {
-  tag1: "6E:", // C3mini might start with this pattern
-  tag2: "33:", // Wroom might start with this pattern
-  tag3: "5E:", // CAM might start with this pattern
+  tag1: "6E:",
+  tag2: "33:",
+  tag3: "5E:",
 };
 
 const STORAGE_KEY = "@searchit_objects";
@@ -49,11 +47,9 @@ const getSignalIcon = (rssi: number | null, bluetoothOff: boolean = false) => {
   return { icon: "cellular-outline", color: "#ffbb00", label: "far" };
 };
 
-// Request BLE and location permissions (Android 12+)
 async function requestBlePermissions(): Promise<boolean> {
   if (Platform.OS === "android") {
     try {
-      // For Android 12+ (API level 31+)
       if (Platform.Version >= 31) {
         const permissions = [
           PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
@@ -76,7 +72,6 @@ async function requestBlePermissions(): Promise<boolean> {
               {
                 text: "Open Settings",
                 onPress: () => {
-                  // This would ideally open settings, but for simplicity we'll just show another alert
                   Alert.alert(
                     "Please open settings and enable all permissions for this app"
                   );
@@ -87,9 +82,7 @@ async function requestBlePermissions(): Promise<boolean> {
           return false;
         }
         return true;
-      }
-      // For Android 6.0+ (API level 23+) but below Android 12
-      else if (Platform.Version >= 23) {
+      } else if (Platform.Version >= 23) {
         const granted = await PermissionsAndroid.request(
           PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
           {
@@ -121,7 +114,7 @@ async function requestBlePermissions(): Promise<boolean> {
       return false;
     }
   }
-  return true; // iOS: handled in Info.plist
+  return true;
 }
 
 type ObjectType = {
@@ -129,7 +122,7 @@ type ObjectType = {
   description: string;
   tag: string;
   password: string;
-  deviceId?: string; // BLE MAC address
+  deviceId?: string;
 };
 
 export default function HomeScreen() {
@@ -147,17 +140,20 @@ export default function HomeScreen() {
   const [errors, setErrors] = useState<{ [key: string]: string }>({});
   const [setupDone, setSetupDone] = useState(false);
 
-  // BLE State
   const [rssiMap, setRssiMap] = useState<{ [tag: string]: number | null }>({});
   const [bluetoothOff, setBluetoothOff] = useState(false);
   const bleManager = useRef<BleManager | null>(null);
 
-  // BLE Picker State
   const [foundDevices, setFoundDevices] = useState<Device[]>([]);
   const [devicePickerVisible, setDevicePickerVisible] = useState(false);
   const [pickerLoading, setPickerLoading] = useState(false);
 
-  // Request permissions on component mount
+  // --- ADDED: refs for each TextInput for focus fix ---
+  const nameRef = useRef<TextInput>(null);
+  const descRef = useRef<TextInput>(null);
+  const passwordRef = useRef<TextInput>(null);
+  const confirmRef = useRef<TextInput>(null);
+
   useEffect(() => {
     const requestPermissions = async () => {
       const permissionsGranted = await requestBlePermissions();
@@ -172,7 +168,6 @@ export default function HomeScreen() {
     requestPermissions();
   }, []);
 
-  // Load objects and setup-done status on mount
   useEffect(() => {
     (async () => {
       const data = await AsyncStorage.getItem(STORAGE_KEY);
@@ -189,28 +184,19 @@ export default function HomeScreen() {
     }
   }, [objects, setupDone]);
 
-  // Helper function to determine which tag a device belongs to based on MAC address
   const getTagForDevice = (deviceId: string): string | null => {
-    // First try exact match with stored deviceId
     const exactMatch = objects.find((obj) => obj.deviceId === deviceId);
     if (exactMatch) {
-      console.log(`Found exact device match: ${deviceId} -> ${exactMatch.tag}`);
       return exactMatch.tag;
     }
-
-    // If no exact match, try pattern matching with known tag patterns
     for (const [tag, pattern] of Object.entries(TAG_MAC_PATTERNS)) {
       if (deviceId.startsWith(pattern)) {
-        console.log(`Found pattern match: ${deviceId} (${pattern}) -> ${tag}`);
         return tag;
       }
     }
-
-    console.log(`No match found for device: ${deviceId}`);
     return null;
   };
 
-  // FIXED BLE scanning logic with improved device-to-tag mapping
   useEffect(() => {
     if (!setupDone || objects.length < 3) return;
 
@@ -235,7 +221,6 @@ export default function HomeScreen() {
       const perms = await requestBlePermissions();
       if (!perms) return;
 
-      // Initialize RSSI map with null values for all tags
       const initialRssiMap = Object.fromEntries(
         objects.map((obj) => [obj.tag, null])
       );
@@ -243,22 +228,11 @@ export default function HomeScreen() {
 
       scanActive = true;
 
-      // For debugging
-      console.log(
-        "Starting BLE scan with objects:",
-        objects.map((obj) => ({
-          name: obj.name,
-          tag: obj.tag,
-          deviceId: obj.deviceId,
-        }))
-      );
-
       bleManager.current!.startDeviceScan(
         null,
         { allowDuplicates: true },
         (error, device) => {
           if (error) {
-            console.error("BLE scan error:", error);
             if (error.errorCode === 102 || error.errorCode === 201) {
               setBluetoothOff(true);
               setRssiMap(initialRssiMap);
@@ -268,20 +242,9 @@ export default function HomeScreen() {
 
           if (!device || !device.id) return;
 
-          // Debug log
-          console.log(
-            `Device found: ${device.name || "unnamed"} (${device.id}) RSSI: ${
-              device.rssi
-            }`
-          );
-
-          // Determine which tag this device belongs to
           const matchedTag = getTagForDevice(device.id);
 
           if (matchedTag) {
-            console.log(`Matched device ${device.id} to tag: ${matchedTag}`);
-
-            // Update RSSI for the matched tag
             setRssiMap((prev) => ({
               ...prev,
               [matchedTag]: device.rssi,
@@ -313,13 +276,30 @@ export default function HomeScreen() {
     };
   }, [setupDone, objects.length, objects]);
 
+  // --- FIX: always reset all refs and their values after adding an object ---
+  // We also focus the first field after showing the form
+  const resetForm = () => {
+    setErrors({});
+    setName("");
+    setDescription("");
+    setSelectedTag(null);
+    setPassword("");
+    setConfirm("");
+    setPasswordVisible(false);
+    setConfirmPasswordVisible(false);
+
+    // Timeout: wait for state update, then focus
+    setTimeout(() => {
+      nameRef.current?.focus();
+    }, 100);
+  };
+
   if (!setupDone || objects.length < 3) {
     const availableTags = TAGS.filter(
       (tag) => !objects.find((obj) => obj.tag === tag.value)
     );
 
     const showDevicePicker = async () => {
-      // Request permissions before showing device picker
       const permissionsGranted = await requestBlePermissions();
       if (!permissionsGranted) {
         Alert.alert(
@@ -347,7 +327,6 @@ export default function HomeScreen() {
         { allowDuplicates: false },
         (error, device) => {
           if (error) {
-            Alert.alert("Scan Error", error.message);
             setPickerLoading(false);
             bleManager.current?.stopDeviceScan();
             clearTimeout(timer);
@@ -381,16 +360,12 @@ export default function HomeScreen() {
     const onDevicePick = async (device: Device) => {
       setDevicePickerVisible(false);
 
-      // Store the device ID in the correct format
       const deviceId = device.id;
 
-      // Update the TAG_MAC_PATTERNS object to help with future identification
       if (selectedTag && selectedTag in TAG_MAC_PATTERNS) {
-        // Extract the first 3 characters of the MAC to use as a pattern
         const pattern = deviceId.substring(0, 3);
-        // @ts-ignore - We know this is safe
+        // @ts-ignore
         TAG_MAC_PATTERNS[selectedTag] = pattern;
-        console.log(`Updated pattern for ${selectedTag}: ${pattern}`);
       }
 
       const obj: ObjectType = {
@@ -406,11 +381,11 @@ export default function HomeScreen() {
       await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
       setModalMsg("Object added successfully!");
       setModalVisible(true);
-      setName("");
-      setDescription("");
-      setSelectedTag(null);
-      setPassword("");
-      setConfirm("");
+
+      // --- FIX: call resetForm after adding an object, and reopen form for next ---
+      resetForm();
+      setShowForm(true);
+
       setTimeout(() => setModalVisible(false), 1800);
     };
 
@@ -423,12 +398,7 @@ export default function HomeScreen() {
 
     const handleShowForm = () => {
       setShowForm(true);
-      setErrors({});
-      setName("");
-      setDescription("");
-      setSelectedTag(null);
-      setPassword("");
-      setConfirm("");
+      resetForm();
     };
 
     return (
@@ -469,22 +439,32 @@ export default function HomeScreen() {
                   Object name <Text style={{ color: "red" }}>*</Text>
                 </Text>
                 <TextInput
+                  ref={nameRef}
                   placeholder="Wallet"
+                  placeholderTextColor="#888"
                   style={[
                     styles.input,
                     errors.name && { borderColor: "red", borderWidth: 1 },
                   ]}
                   value={name}
                   onChangeText={setName}
+                  editable={true}
+                  returnKeyType="next"
+                  onSubmitEditing={() => descRef.current?.focus()}
                 />
                 {errors.name && <Text style={styles.err}>{errors.name}</Text>}
                 <Text style={styles.label}>Description</Text>
                 <TextInput
+                  ref={descRef}
                   placeholder="Write a very short description where you usually place this object."
+                  placeholderTextColor="#888"
                   multiline
                   style={[styles.input, { height: 60 }]}
                   value={description}
                   onChangeText={setDescription}
+                  editable={true}
+                  returnKeyType="next"
+                  onSubmitEditing={() => passwordRef.current?.focus()}
                 />
                 <Text style={styles.label}>
                   Assign Tag <Text style={{ color: "red" }}>*</Text>
@@ -498,15 +478,25 @@ export default function HomeScreen() {
                   <Picker
                     selectedValue={selectedTag}
                     onValueChange={(itemValue) => setSelectedTag(itemValue)}
-                    style={styles.picker}
+                    style={[
+                      styles.picker,
+                      { color: "#000", backgroundColor: "#fff" },
+                    ]}
                     enabled={availableTags.length > 0}
+                    dropdownIconColor="#000"
+                    itemStyle={{ color: "#000", backgroundColor: "#fff" }}
                   >
-                    <Picker.Item label="Select tag..." value={null} />
+                    <Picker.Item
+                      label="Select tag..."
+                      value={null}
+                      color="#000"
+                    />
                     {availableTags.map((tag) => (
                       <Picker.Item
                         key={tag.value}
                         label={tag.label}
                         value={tag.value}
+                        color="#000"
                       />
                     ))}
                   </Picker>
@@ -529,12 +519,17 @@ export default function HomeScreen() {
                     />
                   </Pressable>
                   <TextInput
+                    ref={passwordRef}
                     placeholder="(maximum of 6 characters)"
+                    placeholderTextColor="#888"
                     maxLength={6}
                     secureTextEntry={!passwordVisible}
                     style={styles.passwordInput}
                     value={password}
                     onChangeText={setPassword}
+                    editable={true}
+                    returnKeyType="next"
+                    onSubmitEditing={() => confirmRef.current?.focus()}
                   />
                 </View>
                 {errors.password && (
@@ -560,7 +555,9 @@ export default function HomeScreen() {
                     />
                   </Pressable>
                   <TextInput
+                    ref={confirmRef}
                     placeholder=""
+                    placeholderTextColor="#888"
                     secureTextEntry={!confirmPasswordVisible}
                     style={styles.passwordInput}
                     value={confirm}
@@ -602,7 +599,6 @@ export default function HomeScreen() {
             </View>
           </View>
         </Modal>
-        {/* BLE Device Picker Modal */}
         <Modal
           visible={devicePickerVisible}
           transparent={true}
@@ -834,18 +830,36 @@ const styles = StyleSheet.create({
     textAlign: "center",
     marginBottom: 20,
   },
-  label: { fontWeight: "bold", marginBottom: 6, marginTop: 10 },
-  input: { backgroundColor: "#f2f2f2", borderRadius: 6, padding: 10 },
-  pickerWrapper: { backgroundColor: "#f2f2f2", borderRadius: 6 },
-  picker: { height: 50 },
+  label: { fontWeight: "bold", marginBottom: 6, marginTop: 10, color: "#222" },
+  input: {
+    backgroundColor: "#f2f2f2",
+    color: "#222",
+    borderRadius: 6,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: "#ddd",
+    marginBottom: 6,
+    fontSize: 16,
+  },
+  pickerWrapper: {
+    backgroundColor: "#f2f2f2",
+    borderRadius: 6,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: "#ddd",
+  },
+  picker: { height: 50, color: "#000", backgroundColor: "#fff" },
   passwordField: {
     flexDirection: "row",
     alignItems: "center",
     backgroundColor: "#f2f2f2",
     borderRadius: 6,
     paddingHorizontal: 10,
+    borderWidth: 1,
+    borderColor: "#ddd",
+    marginBottom: 6,
   },
-  passwordInput: { flex: 1, padding: 10 },
+  passwordInput: { flex: 1, padding: 10, color: "#222" },
   confirmButton: {
     backgroundColor: "#247eff",
     padding: 15,

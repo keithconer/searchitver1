@@ -3,10 +3,12 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Picker } from "@react-native-picker/picker";
 import { useEffect, useRef, useState } from "react";
 import {
+  Alert,
   AppState,
   Image,
   KeyboardAvoidingView,
   Modal,
+  PermissionsAndroid,
   Platform,
   Pressable,
   ScrollView,
@@ -62,6 +64,9 @@ export default function HomeScreen() {
   const scanSubscription = useRef<any>(null);
   const appState = useRef(AppState.currentState);
 
+  // Permissions prompt tracking
+  const permissionPrompted = useRef(false);
+
   // Load objects and setup-done status on mount
   useEffect(() => {
     (async () => {
@@ -79,6 +84,38 @@ export default function HomeScreen() {
       setSetupDone(true);
     }
   }, [objects, setupDone]);
+
+  // Prompt permissions after 3 objects added (Android only)
+  useEffect(() => {
+    if (
+      Platform.OS === "android" &&
+      objects.length === 3 &&
+      !permissionPrompted.current
+    ) {
+      permissionPrompted.current = true; // Only show once
+      Alert.alert(
+        "Permissions Required",
+        "This app needs Bluetooth and Location permission to scan for BLE tags. Grant now?",
+        [
+          { text: "Not now", style: "cancel" },
+          {
+            text: "Grant",
+            onPress: async () => {
+              try {
+                await PermissionsAndroid.requestMultiple([
+                  PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+                  PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+                  PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+                ]);
+              } catch (err) {
+                console.warn("Permission error:", err);
+              }
+            },
+          },
+        ]
+      );
+    }
+  }, [objects.length]);
 
   // BLE Scan logic - runs only on objects screen
   useEffect(() => {
@@ -205,6 +242,7 @@ export default function HomeScreen() {
       setConfirm("");
     };
 
+    // LIGHT MODE ONLY: no dark mode logic, always white backgrounds, black text, gray placeholder
     return (
       <SafeAreaView style={styles.container}>
         <KeyboardAvoidingView
@@ -245,10 +283,8 @@ export default function HomeScreen() {
                 </Text>
                 <TextInput
                   placeholder="Wallet"
-                  style={[
-                    styles.input,
-                    errors.name && { borderColor: "red", borderWidth: 1 },
-                  ]}
+                  placeholderTextColor="#888"
+                  style={styles.input}
                   value={name}
                   onChangeText={setName}
                 />
@@ -257,6 +293,7 @@ export default function HomeScreen() {
                 <Text style={styles.label}>Description</Text>
                 <TextInput
                   placeholder="Write a very short description where you usually place this object."
+                  placeholderTextColor="#888"
                   multiline
                   style={[styles.input, { height: 60 }]}
                   value={description}
@@ -266,24 +303,29 @@ export default function HomeScreen() {
                 <Text style={styles.label}>
                   Assign Tag <Text style={{ color: "red" }}>*</Text>
                 </Text>
-                <View
-                  style={[
-                    styles.pickerWrapper,
-                    errors.tag && { borderColor: "red", borderWidth: 1 },
-                  ]}
-                >
+                <View style={styles.pickerWrapper}>
                   <Picker
                     selectedValue={selectedTag}
                     onValueChange={(itemValue) => setSelectedTag(itemValue)}
-                    style={styles.picker}
+                    style={[
+                      styles.picker,
+                      { color: "#000", backgroundColor: "#fff" },
+                    ]}
                     enabled={availableTags.length > 0}
+                    dropdownIconColor="#000"
+                    itemStyle={{ color: "#000", backgroundColor: "#fff" }}
                   >
-                    <Picker.Item label="Select tag..." value={null} />
+                    <Picker.Item
+                      label="Select tag..."
+                      value={null}
+                      color="#000"
+                    />
                     {availableTags.map((tag) => (
                       <Picker.Item
                         key={tag.value}
                         label={tag.label}
                         value={tag.value}
+                        color="#000"
                       />
                     ))}
                   </Picker>
@@ -293,12 +335,7 @@ export default function HomeScreen() {
                 <Text style={styles.label}>
                   Set Password <Text style={{ color: "red" }}>*</Text>
                 </Text>
-                <View
-                  style={[
-                    styles.passwordField,
-                    errors.password && { borderColor: "red", borderWidth: 1 },
-                  ]}
-                >
+                <View style={styles.passwordField}>
                   <Pressable onPress={() => setPasswordVisible((v) => !v)}>
                     <Ionicons
                       name={passwordVisible ? "eye" : "eye-off"}
@@ -308,9 +345,10 @@ export default function HomeScreen() {
                   </Pressable>
                   <TextInput
                     placeholder="(maximum of 6 characters)"
+                    placeholderTextColor="#888"
                     maxLength={6}
                     secureTextEntry={!passwordVisible}
-                    style={styles.passwordInput}
+                    style={[styles.passwordInput, { color: "#222" }]}
                     value={password}
                     onChangeText={setPassword}
                   />
@@ -322,12 +360,7 @@ export default function HomeScreen() {
                 <Text style={styles.label}>
                   Confirm Password <Text style={{ color: "red" }}>*</Text>
                 </Text>
-                <View
-                  style={[
-                    styles.passwordField,
-                    errors.confirm && { borderColor: "red", borderWidth: 1 },
-                  ]}
-                >
+                <View style={styles.passwordField}>
                   <Pressable
                     onPress={() => setConfirmPasswordVisible((v) => !v)}
                     disabled={password.length === 0}
@@ -340,8 +373,9 @@ export default function HomeScreen() {
                   </Pressable>
                   <TextInput
                     placeholder=""
+                    placeholderTextColor="#888"
                     secureTextEntry={!confirmPasswordVisible}
-                    style={styles.passwordInput}
+                    style={[styles.passwordInput, { color: "#222" }]}
                     value={confirm}
                     onChangeText={setConfirm}
                     editable={password.length > 0}
@@ -533,18 +567,36 @@ const styles = StyleSheet.create({
     textAlign: "center",
     marginBottom: 20,
   },
-  label: { fontWeight: "bold", marginBottom: 6, marginTop: 10 },
-  input: { backgroundColor: "#f2f2f2", borderRadius: 6, padding: 10 },
-  pickerWrapper: { backgroundColor: "#f2f2f2", borderRadius: 6 },
-  picker: { height: 50 },
+  label: { fontWeight: "bold", marginBottom: 6, marginTop: 10, color: "#222" },
+  input: {
+    backgroundColor: "#f2f2f2",
+    color: "#222",
+    borderRadius: 6,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: "#ddd",
+    marginBottom: 6,
+    fontSize: 16,
+  },
+  pickerWrapper: {
+    backgroundColor: "#fff",
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: "#ddd",
+    marginBottom: 10,
+  },
+  picker: { height: 50, color: "#000", backgroundColor: "#fff" },
   passwordField: {
     flexDirection: "row",
     alignItems: "center",
     backgroundColor: "#f2f2f2",
     borderRadius: 6,
     paddingHorizontal: 10,
+    borderWidth: 1,
+    borderColor: "#ddd",
+    marginBottom: 6,
   },
-  passwordInput: { flex: 1, padding: 10 },
+  passwordInput: { flex: 1, padding: 10, color: "#222" },
   confirmButton: {
     backgroundColor: "#247eff",
     padding: 15,
