@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   Alert,
   AppState,
+  FlatList,
   Image,
   KeyboardAvoidingView,
   Modal,
@@ -18,7 +19,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import { BleManager } from "react-native-ble-plx";
+import { BleManager, State as BleState, Device } from "react-native-ble-plx";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 const TAGS = [
@@ -27,13 +28,20 @@ const TAGS = [
   { label: "ESP32 CAM (Tag 3)", value: "tag3" },
 ];
 
+// Map tag values to expected device MAC address patterns
+// This helps identify which device corresponds to which tag
+const TAG_MAC_PATTERNS = {
+  tag1: "6E:", // C3mini might start with this pattern
+  tag2: "33:", // Wroom might start with this pattern
+  tag3: "5E:", // CAM might start with this pattern
+};
+
 const STORAGE_KEY = "@searchit_objects";
 const SETUP_DONE_KEY = "@searchit_setup_done";
 
-// ICONS for signal
-const getSignalIcon = (rssi: number | null) => {
-  if (rssi === null)
-    return { icon: "warning-outline", color: "#666", label: "n/a" };
+const getSignalIcon = (rssi: number | null, bluetoothOff: boolean = false) => {
+  if (bluetoothOff || rssi === null)
+    return { icon: "warning-outline", color: "#ff3b30", label: "n/a" };
   if (rssi >= -40)
     return { icon: "cellular", color: "#247eff", label: "very near" };
   if (rssi >= -60)
@@ -43,32 +51,69 @@ const getSignalIcon = (rssi: number | null) => {
 
 // Request BLE and location permissions (Android 12+)
 async function requestBlePermissions(): Promise<boolean> {
-  if (Platform.OS === "android" && Platform.Version >= 23) {
-    const permissions = [
-      PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-      PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-      PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-    ];
-    const rationale = {
-      title: "Bluetooth & Location Permissions Required",
-      message:
-        "This app needs Bluetooth and Location permissions to scan for BLE devices.",
-      buttonPositive: "OK",
-    };
+  if (Platform.OS === "android") {
     try {
-      const granted = await PermissionsAndroid.requestMultiple(permissions);
-      const allGranted = permissions.every(
-        (perm) => granted[perm] === PermissionsAndroid.RESULTS.GRANTED
-      );
-      if (!allGranted) {
-        Alert.alert(
-          "Permissions Required",
-          "Bluetooth and Location permissions are needed for BLE scanning. Please enable them in your phone settings."
+      // For Android 12+ (API level 31+)
+      if (Platform.Version >= 31) {
+        const permissions = [
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+        ];
+
+        const granted = await PermissionsAndroid.requestMultiple(permissions);
+
+        const allGranted = Object.values(granted).every(
+          (status) => status === PermissionsAndroid.RESULTS.GRANTED
         );
-        return false;
+
+        if (!allGranted) {
+          Alert.alert(
+            "Permissions Required",
+            "Bluetooth and Location permissions are needed for BLE scanning. Please enable them in your phone settings.",
+            [
+              { text: "Cancel", style: "cancel" },
+              {
+                text: "Open Settings",
+                onPress: () => {
+                  // This would ideally open settings, but for simplicity we'll just show another alert
+                  Alert.alert(
+                    "Please open settings and enable all permissions for this app"
+                  );
+                },
+              },
+            ]
+          );
+          return false;
+        }
+        return true;
+      }
+      // For Android 6.0+ (API level 23+) but below Android 12
+      else if (Platform.Version >= 23) {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+          {
+            title: "Location Permission",
+            message:
+              "This app needs access to your location to scan for BLE devices",
+            buttonNeutral: "Ask Me Later",
+            buttonNegative: "Cancel",
+            buttonPositive: "OK",
+          }
+        );
+
+        if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
+          Alert.alert(
+            "Permission Denied",
+            "Location permission is required for BLE scanning"
+          );
+          return false;
+        }
+        return true;
       }
       return true;
     } catch (err) {
+      console.error("Permission request error:", err);
       Alert.alert(
         "Permission Error",
         "Could not request Bluetooth/Location permissions."
@@ -79,9 +124,17 @@ async function requestBlePermissions(): Promise<boolean> {
   return true; // iOS: handled in Info.plist
 }
 
+type ObjectType = {
+  name: string;
+  description: string;
+  tag: string;
+  password: string;
+  deviceId?: string; // BLE MAC address
+};
+
 export default function HomeScreen() {
   const [showForm, setShowForm] = useState(false);
-  const [objects, setObjects] = useState<any[]>([]);
+  const [objects, setObjects] = useState<ObjectType[]>([]);
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -96,14 +149,27 @@ export default function HomeScreen() {
 
   // BLE State
   const [rssiMap, setRssiMap] = useState<{ [tag: string]: number | null }>({});
+  const [bluetoothOff, setBluetoothOff] = useState(false);
   const bleManager = useRef<BleManager | null>(null);
-  const appState = useRef(AppState.currentState);
 
-  // Request permissions once, before any BLE activity
+  // BLE Picker State
+  const [foundDevices, setFoundDevices] = useState<Device[]>([]);
+  const [devicePickerVisible, setDevicePickerVisible] = useState(false);
+  const [pickerLoading, setPickerLoading] = useState(false);
+
+  // Request permissions on component mount
   useEffect(() => {
-    (async () => {
-      await requestBlePermissions();
-    })();
+    const requestPermissions = async () => {
+      const permissionsGranted = await requestBlePermissions();
+      if (!permissionsGranted) {
+        Alert.alert(
+          "Permissions Required",
+          "This app requires Bluetooth and Location permissions to function properly. Please grant these permissions in your device settings."
+        );
+      }
+    };
+
+    requestPermissions();
   }, []);
 
   // Load objects and setup-done status on mount
@@ -117,59 +183,109 @@ export default function HomeScreen() {
   }, []);
 
   useEffect(() => {
-    // If objects are 3, set setup as done (one-time)
     if (objects.length === 3 && !setupDone) {
       AsyncStorage.setItem(SETUP_DONE_KEY, "true");
       setSetupDone(true);
     }
   }, [objects, setupDone]);
 
-  // BLE Scan logic - runs only on objects screen
+  // Helper function to determine which tag a device belongs to based on MAC address
+  const getTagForDevice = (deviceId: string): string | null => {
+    // First try exact match with stored deviceId
+    const exactMatch = objects.find((obj) => obj.deviceId === deviceId);
+    if (exactMatch) {
+      console.log(`Found exact device match: ${deviceId} -> ${exactMatch.tag}`);
+      return exactMatch.tag;
+    }
+
+    // If no exact match, try pattern matching with known tag patterns
+    for (const [tag, pattern] of Object.entries(TAG_MAC_PATTERNS)) {
+      if (deviceId.startsWith(pattern)) {
+        console.log(`Found pattern match: ${deviceId} (${pattern}) -> ${tag}`);
+        return tag;
+      }
+    }
+
+    console.log(`No match found for device: ${deviceId}`);
+    return null;
+  };
+
+  // FIXED BLE scanning logic with improved device-to-tag mapping
   useEffect(() => {
     if (!setupDone || objects.length < 3) return;
 
-    let isMounted = true;
     bleManager.current = new BleManager();
+    let scanActive = false;
 
-    let lastSeenMap: { [id: string]: number } = {};
+    const stateSubscription = bleManager.current.onStateChange((state) => {
+      if (state === BleState.PoweredOff) {
+        setBluetoothOff(true);
+        setRssiMap(Object.fromEntries(objects.map((obj) => [obj.tag, null])));
+        bleManager.current && bleManager.current.stopDeviceScan();
+        scanActive = false;
+      } else if (state === BleState.PoweredOn) {
+        setBluetoothOff(false);
+        if (!scanActive) {
+          startBleScan();
+        }
+      }
+    }, true);
 
     async function startBleScan() {
       const perms = await requestBlePermissions();
       if (!perms) return;
 
-      setRssiMap({});
+      // Initialize RSSI map with null values for all tags
+      const initialRssiMap = Object.fromEntries(
+        objects.map((obj) => [obj.tag, null])
+      );
+      setRssiMap(initialRssiMap);
+
+      scanActive = true;
+
+      // For debugging
+      console.log(
+        "Starting BLE scan with objects:",
+        objects.map((obj) => ({
+          name: obj.name,
+          tag: obj.tag,
+          deviceId: obj.deviceId,
+        }))
+      );
+
       bleManager.current!.startDeviceScan(
         null,
         { allowDuplicates: true },
         (error, device) => {
           if (error) {
-            console.warn("BLE scan error:", error);
+            console.error("BLE scan error:", error);
+            if (error.errorCode === 102 || error.errorCode === 201) {
+              setBluetoothOff(true);
+              setRssiMap(initialRssiMap);
+            }
             return;
           }
-          if (!device) return;
-          // Debug: Log all found devices
+
+          if (!device || !device.id) return;
+
+          // Debug log
           console.log(
-            "Found device:",
-            device.name,
-            device.localName,
-            device.id,
-            device.rssi
+            `Device found: ${device.name || "unnamed"} (${device.id}) RSSI: ${
+              device.rssi
+            }`
           );
-          // Loosen name check for debugging
-          const devName = device.name || device.localName;
-          if (devName && devName.includes("ESP32")) {
-            // Assign RSSI to the first tag that doesn't already have a value
-            let tagIdx = 0;
-            for (; tagIdx < objects.length; tagIdx++) {
-              if (!rssiMap[objects[tagIdx].tag]) break;
-            }
-            if (tagIdx < objects.length) {
-              lastSeenMap[device.id] = Date.now();
-              setRssiMap((prev) => ({
-                ...prev,
-                [objects[tagIdx].tag]: device.rssi,
-              }));
-            }
+
+          // Determine which tag this device belongs to
+          const matchedTag = getTagForDevice(device.id);
+
+          if (matchedTag) {
+            console.log(`Matched device ${device.id} to tag: ${matchedTag}`);
+
+            // Update RSSI for the matched tag
+            setRssiMap((prev) => ({
+              ...prev,
+              [matchedTag]: device.rssi,
+            }));
           }
         }
       );
@@ -177,10 +293,9 @@ export default function HomeScreen() {
 
     startBleScan();
 
-    // Clean-up: stop scan and destroy manager on unmount/app-background
     const handleAppStateChange = (nextAppState: string) => {
       if (nextAppState === "active") {
-        startBleScan();
+        if (!bluetoothOff) startBleScan();
       } else if (nextAppState.match(/inactive|background/)) {
         bleManager.current && bleManager.current.stopDeviceScan();
       }
@@ -194,15 +309,62 @@ export default function HomeScreen() {
       bleManager.current && bleManager.current.stopDeviceScan();
       bleManager.current && bleManager.current.destroy();
       appStateSubscription && appStateSubscription.remove();
-      isMounted = false;
+      stateSubscription && stateSubscription.remove();
     };
-  }, [setupDone, objects.length]);
+  }, [setupDone, objects.length, objects]);
 
-  // Only show add-object workflow if setup is not done or less than 3 objects exist
   if (!setupDone || objects.length < 3) {
     const availableTags = TAGS.filter(
       (tag) => !objects.find((obj) => obj.tag === tag.value)
     );
+
+    const showDevicePicker = async () => {
+      // Request permissions before showing device picker
+      const permissionsGranted = await requestBlePermissions();
+      if (!permissionsGranted) {
+        Alert.alert(
+          "Permissions Required",
+          "Bluetooth and Location permissions are needed to scan for devices."
+        );
+        return;
+      }
+
+      setFoundDevices([]);
+      setDevicePickerVisible(true);
+      setPickerLoading(true);
+
+      let scanned: { [id: string]: Device } = {};
+      let timer: NodeJS.Timeout;
+
+      if (bleManager.current) {
+        bleManager.current.stopDeviceScan();
+      } else {
+        bleManager.current = new BleManager();
+      }
+
+      bleManager.current.startDeviceScan(
+        null,
+        { allowDuplicates: false },
+        (error, device) => {
+          if (error) {
+            Alert.alert("Scan Error", error.message);
+            setPickerLoading(false);
+            bleManager.current?.stopDeviceScan();
+            clearTimeout(timer);
+            return;
+          }
+          if (!device || !device.id) return;
+          if (typeof device.rssi === "number" && !scanned[device.id]) {
+            scanned[device.id] = device;
+            setFoundDevices((prev) => [...prev, device]);
+          }
+        }
+      );
+      timer = setTimeout(() => {
+        setPickerLoading(false);
+        bleManager.current?.stopDeviceScan();
+      }, 6000);
+    };
 
     const validate = () => {
       let err: { [key: string]: string } = {};
@@ -216,17 +378,29 @@ export default function HomeScreen() {
       return err;
     };
 
-    const onConfirm = async () => {
-      const err = validate();
-      setErrors(err);
-      if (Object.keys(err).length > 0) return;
+    const onDevicePick = async (device: Device) => {
+      setDevicePickerVisible(false);
 
-      const obj = {
+      // Store the device ID in the correct format
+      const deviceId = device.id;
+
+      // Update the TAG_MAC_PATTERNS object to help with future identification
+      if (selectedTag && selectedTag in TAG_MAC_PATTERNS) {
+        // Extract the first 3 characters of the MAC to use as a pattern
+        const pattern = deviceId.substring(0, 3);
+        // @ts-ignore - We know this is safe
+        TAG_MAC_PATTERNS[selectedTag] = pattern;
+        console.log(`Updated pattern for ${selectedTag}: ${pattern}`);
+      }
+
+      const obj: ObjectType = {
         name: name.trim(),
         description: description.trim(),
-        tag: selectedTag,
+        tag: selectedTag!,
         password,
+        deviceId: deviceId,
       };
+
       const updated = [...objects, obj];
       setObjects(updated);
       await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
@@ -238,6 +412,13 @@ export default function HomeScreen() {
       setPassword("");
       setConfirm("");
       setTimeout(() => setModalVisible(false), 1800);
+    };
+
+    const onConfirm = async () => {
+      const err = validate();
+      setErrors(err);
+      if (Object.keys(err).length > 0) return;
+      showDevicePicker();
     };
 
     const handleShowForm = () => {
@@ -284,7 +465,6 @@ export default function HomeScreen() {
                 <Text style={styles.title}>
                   Add Object ({objects.length}/3)
                 </Text>
-
                 <Text style={styles.label}>
                   Object name <Text style={{ color: "red" }}>*</Text>
                 </Text>
@@ -298,7 +478,6 @@ export default function HomeScreen() {
                   onChangeText={setName}
                 />
                 {errors.name && <Text style={styles.err}>{errors.name}</Text>}
-
                 <Text style={styles.label}>Description</Text>
                 <TextInput
                   placeholder="Write a very short description where you usually place this object."
@@ -307,7 +486,6 @@ export default function HomeScreen() {
                   value={description}
                   onChangeText={setDescription}
                 />
-
                 <Text style={styles.label}>
                   Assign Tag <Text style={{ color: "red" }}>*</Text>
                 </Text>
@@ -334,7 +512,6 @@ export default function HomeScreen() {
                   </Picker>
                 </View>
                 {errors.tag && <Text style={styles.err}>{errors.tag}</Text>}
-
                 <Text style={styles.label}>
                   Set Password <Text style={{ color: "red" }}>*</Text>
                 </Text>
@@ -363,7 +540,6 @@ export default function HomeScreen() {
                 {errors.password && (
                   <Text style={styles.err}>{errors.password}</Text>
                 )}
-
                 <Text style={styles.label}>
                   Confirm Password <Text style={{ color: "red" }}>*</Text>
                 </Text>
@@ -395,7 +571,6 @@ export default function HomeScreen() {
                 {errors.confirm && (
                   <Text style={styles.err}>{errors.confirm}</Text>
                 )}
-
                 <TouchableOpacity
                   style={[
                     styles.confirmButton,
@@ -408,13 +583,12 @@ export default function HomeScreen() {
                 </TouchableOpacity>
               </View>
             )}
-            <View style={{ height: 20 }} /> {/* Spacer for keyboard */}
+            <View style={{ height: 20 }} />
           </ScrollView>
           <Text style={styles.footer}>
             Search It, 2025. All Rights Reserved.
           </Text>
         </KeyboardAvoidingView>
-
         <Modal
           visible={modalVisible}
           transparent={true}
@@ -428,11 +602,80 @@ export default function HomeScreen() {
             </View>
           </View>
         </Modal>
+        {/* BLE Device Picker Modal */}
+        <Modal
+          visible={devicePickerVisible}
+          transparent={true}
+          animationType="slide"
+          onRequestClose={() => setDevicePickerVisible(false)}
+        >
+          <View style={styles.devicePickerBg}>
+            <View style={styles.devicePickerContainer}>
+              <Text style={styles.pickerTitle}>
+                Select the correct BLE device for this object
+              </Text>
+              {pickerLoading ? (
+                <Text style={styles.pickerLoading}>
+                  Scanning nearby devices...
+                </Text>
+              ) : foundDevices.length === 0 ? (
+                <Text style={styles.pickerLoading}>
+                  No devices found. Try again.
+                </Text>
+              ) : (
+                <FlatList
+                  data={foundDevices}
+                  keyExtractor={(item) => item.id}
+                  renderItem={({ item }) => (
+                    <TouchableOpacity
+                      style={styles.deviceItem}
+                      onPress={() => onDevicePick(item)}
+                    >
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ fontWeight: "bold" }}>
+                          {item.name || item.localName || "Unnamed"}
+                        </Text>
+                        <Text style={{ fontSize: 13, color: "#666" }}>
+                          {item.id}
+                        </Text>
+                      </View>
+                      <Text style={{ fontWeight: "bold", color: "#247eff" }}>
+                        RSSI: {item.rssi}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+                  ListFooterComponent={
+                    <TouchableOpacity
+                      style={styles.rescanButton}
+                      onPress={() => {
+                        setFoundDevices([]);
+                        setPickerLoading(true);
+                        if (bleManager.current)
+                          bleManager.current.stopDeviceScan();
+                        showDevicePicker();
+                      }}
+                    >
+                      <Ionicons name="refresh" size={18} color="#247eff" />
+                      <Text style={{ color: "#247eff", marginLeft: 6 }}>
+                        Scan again
+                      </Text>
+                    </TouchableOpacity>
+                  }
+                />
+              )}
+              <TouchableOpacity
+                style={styles.cancelButton}
+                onPress={() => setDevicePickerVisible(false)}
+              >
+                <Text style={styles.cancelButtonText}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
       </SafeAreaView>
     );
   }
 
-  // --- EXISTING OBJECTS LIST SCREEN (Landing page after setup) ---
   return (
     <SafeAreaView style={styles.containerNoPad}>
       <ScrollView contentContainerStyle={{ flexGrow: 1 }}>
@@ -446,33 +689,41 @@ export default function HomeScreen() {
         <Text style={styles.selectLabel}>Select Object</Text>
         <View style={styles.objectListWrapper}>
           {objects.map((obj, idx) => {
-            // Use RSSI from BLE scan, or null if not detected
             const rssi = obj.tag in rssiMap ? rssiMap[obj.tag] : null;
-            const signal = getSignalIcon(rssi);
+            const signal = getSignalIcon(rssi, bluetoothOff);
             return (
               <View style={styles.objectItem} key={obj.tag}>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.objectName}>{obj.name}</Text>
                   <Text style={styles.objectDesc}>{obj.description}</Text>
+                  <Text style={styles.deviceIdLabel}>
+                    {obj.deviceId
+                      ? `Device: ${obj.deviceId}`
+                      : "No device assigned"}
+                  </Text>
                 </View>
                 <View style={styles.signalSection}>
                   <Text
                     style={[
                       styles.signalValue,
                       { color: signal.color },
-                      rssi === null && { color: "#666" },
+                      (rssi === null || bluetoothOff) && {
+                        color: signal.color,
+                      },
                     ]}
                   >
-                    {rssi !== null ? `${rssi}` : "n/a"}
+                    {rssi !== null && !bluetoothOff ? `${rssi}` : "n/a"}
                   </Text>
                   <Text
                     style={[
                       styles.signalLabel,
                       { color: signal.color },
-                      rssi === null && { color: "#666" },
+                      (rssi === null || bluetoothOff) && {
+                        color: signal.color,
+                      },
                     ]}
                   >
-                    {rssi !== null ? `(${signal.label})` : ""}
+                    {rssi !== null && !bluetoothOff ? `(${signal.label})` : ""}
                   </Text>
                 </View>
                 <Ionicons
@@ -544,6 +795,11 @@ const styles = StyleSheet.create({
   objectDesc: {
     color: "#999",
     fontSize: 14,
+    marginTop: 2,
+  },
+  deviceIdLabel: {
+    fontSize: 11,
+    color: "#888",
     marginTop: 2,
   },
   signalSection: {
@@ -628,5 +884,65 @@ const styles = StyleSheet.create({
     color: "#247eff",
     fontWeight: "bold",
     textAlign: "center",
+  },
+  devicePickerBg: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.08)",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  devicePickerContainer: {
+    backgroundColor: "#fff",
+    borderRadius: 16,
+    paddingVertical: 20,
+    paddingHorizontal: 16,
+    width: "85%",
+    maxHeight: "70%",
+    alignItems: "stretch",
+  },
+  pickerTitle: {
+    fontWeight: "bold",
+    fontSize: 17,
+    color: "#247eff",
+    marginBottom: 8,
+    textAlign: "center",
+  },
+  pickerLoading: {
+    fontStyle: "italic",
+    color: "#888",
+    textAlign: "center",
+    marginVertical: 24,
+  },
+  deviceItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#f7faff",
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 8,
+    borderColor: "#e1eaff",
+    borderWidth: 1,
+  },
+  rescanButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 16,
+    padding: 8,
+    alignSelf: "center",
+    backgroundColor: "#eef5ff",
+    borderRadius: 8,
+  },
+  cancelButton: {
+    marginTop: 10,
+    alignSelf: "center",
+    backgroundColor: "#eee",
+    borderRadius: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  cancelButtonText: {
+    color: "#888",
+    fontWeight: "bold",
+    fontSize: 15,
   },
 });

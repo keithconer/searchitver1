@@ -1,0 +1,50 @@
+# Node dependencies
+node_modules
+
+# Git, IDE, and system files
+.git
+.gitignore
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Build outputs
+android/app/build
+android/build
+ios/build
+web-build
+dist
+
+# Test & docs
+*.test.*
+tests/
+__tests__/
+coverage/
+docs/
+*.md
+
+# Miscellaneous archives and large files
+*.zip
+*.tar
+*.tar.gz
+*.rar
+*.7z
+*.mp4
+*.mov
+*.psd
+*.ai
+*.sketch
+*.bak
+
+# Expo local files
+.expo
+.expo-shared
+
+# Environment & local config
+.env*
+*.local
+
+# Mac OS and Windows system files
+*.DS_Store
+Thumbs.db
