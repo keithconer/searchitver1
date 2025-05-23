@@ -1,10 +1,9 @@
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { Picker } from "@react-native-picker/picker";
 import { useEffect, useRef, useState } from "react";
 import {
-  Alert,
   AppState,
+  FlatList,
   Image,
   KeyboardAvoidingView,
   Modal,
@@ -18,7 +17,8 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import { BleManager } from "react-native-ble-plx";
+import { BleManager, State as BleState, Device } from "react-native-ble-plx";
+import DropDownPicker from "react-native-dropdown-picker";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 const TAGS = [
@@ -27,15 +27,18 @@ const TAGS = [
   { label: "ESP32 CAM (Tag 3)", value: "tag3" },
 ];
 
+const TAG_MAC_PATTERNS = {
+  tag1: "6E:",
+  tag2: "33:",
+  tag3: "5E:",
+};
+
 const STORAGE_KEY = "@searchit_objects";
 const SETUP_DONE_KEY = "@searchit_setup_done";
-const BLE_DEVICE_NAME = "ESP32-Locator";
-const SERVICE_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
 
-// ICONS for signal
-const getSignalIcon = (rssi: number | null) => {
-  if (rssi === null)
-    return { icon: "warning-outline", color: "#666", label: "n/a" };
+const getSignalIcon = (rssi: number | null, bluetoothOff: boolean = false) => {
+  if (bluetoothOff || rssi === null)
+    return { icon: "warning-outline", color: "#ff3b30", label: "n/a" };
   if (rssi >= -40)
     return { icon: "cellular", color: "#247eff", label: "very near" };
   if (rssi >= -60)
@@ -43,9 +46,17 @@ const getSignalIcon = (rssi: number | null) => {
   return { icon: "cellular-outline", color: "#ffbb00", label: "far" };
 };
 
+type ObjectType = {
+  name: string;
+  description: string;
+  tag: string;
+  password: string;
+  deviceId?: string;
+};
+
 export default function HomeScreen() {
   const [showForm, setShowForm] = useState(false);
-  const [objects, setObjects] = useState<any[]>([]);
+  const [objects, setObjects] = useState<ObjectType[]>([]);
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -58,16 +69,87 @@ export default function HomeScreen() {
   const [errors, setErrors] = useState<{ [key: string]: string }>({});
   const [setupDone, setSetupDone] = useState(false);
 
-  // BLE State
   const [rssiMap, setRssiMap] = useState<{ [tag: string]: number | null }>({});
+  const [bluetoothOff, setBluetoothOff] = useState(false);
   const bleManager = useRef<BleManager | null>(null);
-  const scanSubscription = useRef<any>(null);
-  const appState = useRef(AppState.currentState);
 
-  // Permissions prompt tracking
-  const permissionPrompted = useRef(false);
+  const [foundDevices, setFoundDevices] = useState<Device[]>([]);
+  const [devicePickerVisible, setDevicePickerVisible] = useState(false);
+  const [pickerLoading, setPickerLoading] = useState(false);
 
-  // Load objects and setup-done status on mount
+  // For custom picker
+  const [tagPickerOpen, setTagPickerOpen] = useState(false);
+  const [tagPickerItems, setTagPickerItems] = useState(TAGS);
+
+  // For custom modal (permission)
+  const [permissionModalVisible, setPermissionModalVisible] = useState(false);
+  const [pendingPermissionResolve, setPendingPermissionResolve] = useState<
+    ((result: boolean) => void) | null
+  >(null);
+
+  // For custom modal (grant)
+  const [grantModalVisible, setGrantModalVisible] = useState(false);
+  const [pendingGrantResolve, setPendingGrantResolve] = useState<
+    ((result: boolean) => void) | null
+  >(null);
+
+  // For focus fix
+  const nameRef = useRef<TextInput>(null);
+  const descRef = useRef<TextInput>(null);
+  const passwordRef = useRef<TextInput>(null);
+  const confirmRef = useRef<TextInput>(null);
+
+  // Custom BLE permission request (returns true if granted)
+  async function requestBlePermissionsCustom(): Promise<boolean> {
+    if (Platform.OS === "android") {
+      // Show custom permission modal first (white bg, black text)
+      return await new Promise<boolean>((resolve) => {
+        setPermissionModalVisible(true);
+        setPendingPermissionResolve(() => resolve);
+      });
+    }
+    return true;
+  }
+
+  // Custom grant modal before system permission dialog
+  async function showGrantModal(): Promise<boolean> {
+    return await new Promise<boolean>((resolve) => {
+      setGrantModalVisible(true);
+      setPendingGrantResolve(() => resolve);
+    });
+  }
+
+  async function actuallyRequestPermissions(): Promise<boolean> {
+    if (Platform.OS === "android") {
+      try {
+        // Show custom "Grant permissions" modal before system dialog
+        const grant = await showGrantModal();
+        if (!grant) return false;
+
+        if (Platform.Version >= 31) {
+          const permissions = [
+            PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+            PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+            PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+          ];
+          const result = await PermissionsAndroid.requestMultiple(permissions);
+          return Object.values(result).every(
+            (status) => status === PermissionsAndroid.RESULTS.GRANTED
+          );
+        } else if (Platform.Version >= 23) {
+          const result = await PermissionsAndroid.request(
+            PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION
+          );
+          return result === PermissionsAndroid.RESULTS.GRANTED;
+        }
+        return true;
+      } catch (err) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   useEffect(() => {
     (async () => {
       const data = await AsyncStorage.getItem(STORAGE_KEY);
@@ -78,104 +160,91 @@ export default function HomeScreen() {
   }, []);
 
   useEffect(() => {
-    // If objects are 3, set setup as done (one-time)
     if (objects.length === 3 && !setupDone) {
       AsyncStorage.setItem(SETUP_DONE_KEY, "true");
       setSetupDone(true);
     }
   }, [objects, setupDone]);
 
-  // Prompt permissions after 3 objects added (Android only)
-  useEffect(() => {
-    if (
-      Platform.OS === "android" &&
-      objects.length === 3 &&
-      !permissionPrompted.current
-    ) {
-      permissionPrompted.current = true; // Only show once
-      Alert.alert(
-        "Permissions Required",
-        "This app needs Bluetooth and Location permission to scan for BLE tags. Grant now?",
-        [
-          { text: "Not now", style: "cancel" },
-          {
-            text: "Grant",
-            onPress: async () => {
-              try {
-                await PermissionsAndroid.requestMultiple([
-                  PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-                  PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-                  PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-                ]);
-              } catch (err) {
-                console.warn("Permission error:", err);
-              }
-            },
-          },
-        ]
-      );
+  const getTagForDevice = (deviceId: string): string | null => {
+    const exactMatch = objects.find((obj) => obj.deviceId === deviceId);
+    if (exactMatch) {
+      return exactMatch.tag;
     }
-  }, [objects.length]);
+    for (const [tag, pattern] of Object.entries(TAG_MAC_PATTERNS)) {
+      if (deviceId.startsWith(pattern)) {
+        return tag;
+      }
+    }
+    return null;
+  };
 
-  // BLE Scan logic - runs only on objects screen
   useEffect(() => {
     if (!setupDone || objects.length < 3) return;
 
     bleManager.current = new BleManager();
+    let scanActive = false;
 
-    let isCancelled = false;
-    let lastSeenMap: { [id: string]: number } = {};
+    const stateSubscription = bleManager.current.onStateChange((state) => {
+      if (state === BleState.PoweredOff) {
+        setBluetoothOff(true);
+        setRssiMap(Object.fromEntries(objects.map((obj) => [obj.tag, null])));
+        bleManager.current && bleManager.current.stopDeviceScan();
+        scanActive = false;
+      } else if (state === BleState.PoweredOn) {
+        setBluetoothOff(false);
+        if (!scanActive) {
+          startBleScan();
+        }
+      }
+    }, true);
 
-    const startScan = () => {
-      // Reset RSSI map every scan start
-      setRssiMap({});
-      scanSubscription.current = bleManager.current!.startDeviceScan(
+    async function startBleScan() {
+      const permsGranted = await requestBlePermissionsCustom();
+      if (!permsGranted) return;
+      const perms = await actuallyRequestPermissions();
+      if (!perms) return;
+
+      const initialRssiMap = Object.fromEntries(
+        objects.map((obj) => [obj.tag, null])
+      );
+      setRssiMap(initialRssiMap);
+
+      scanActive = true;
+
+      bleManager.current!.startDeviceScan(
         null,
         { allowDuplicates: true },
         (error, device) => {
           if (error) {
-            console.warn("BLE scan error:", error);
+            if (error.errorCode === 102 || error.errorCode === 201) {
+              setBluetoothOff(true);
+              setRssiMap(initialRssiMap);
+            }
             return;
           }
-          if (!device) return;
-          // Debug: Log all found devices
-          console.log(
-            "Found device:",
-            device.name,
-            device.localName,
-            device.id,
-            device.rssi
-          );
-          // Loosen name check for debugging
-          const devName = device.name || device.localName;
-          if (devName && devName.includes("ESP32")) {
-            // Assign RSSI to the first tag that doesn't already have a "recent" value
-            let tagIdx = 0;
-            for (; tagIdx < objects.length; tagIdx++) {
-              // If this tag does not already have an RSSI, assign
-              if (!rssiMap[objects[tagIdx].tag]) break;
-            }
-            if (tagIdx < objects.length) {
-              // Mark this tag as "seen", set RSSI
-              lastSeenMap[device.id] = Date.now();
-              setRssiMap((prev) => ({
-                ...prev,
-                [objects[tagIdx].tag]: device.rssi,
-              }));
-            }
+
+          if (!device || !device.id) return;
+
+          const matchedTag = getTagForDevice(device.id);
+
+          if (matchedTag) {
+            setRssiMap((prev) => ({
+              ...prev,
+              [matchedTag]: device.rssi,
+            }));
           }
         }
       );
-    };
+    }
 
-    startScan();
+    startBleScan();
 
-    // Clean-up: stop scan and destroy manager on unmount/app-background
     const handleAppStateChange = (nextAppState: string) => {
       if (nextAppState === "active") {
-        startScan();
+        if (!bluetoothOff) startBleScan();
       } else if (nextAppState.match(/inactive|background/)) {
-        scanSubscription.current && scanSubscription.current.remove();
+        bleManager.current && bleManager.current.stopDeviceScan();
       }
     };
     const appStateSubscription = AppState.addEventListener(
@@ -184,17 +253,74 @@ export default function HomeScreen() {
     );
 
     return () => {
-      scanSubscription.current && scanSubscription.current.remove();
+      bleManager.current && bleManager.current.stopDeviceScan();
       bleManager.current && bleManager.current.destroy();
       appStateSubscription && appStateSubscription.remove();
+      stateSubscription && stateSubscription.remove();
     };
-  }, [setupDone, objects.length]);
+  }, [setupDone, objects.length, objects]);
 
-  // Only show add-object workflow if setup is not done or less than 3 objects exist
+  // always reset all refs and their values after adding an object
+  const resetForm = () => {
+    setErrors({});
+    setName("");
+    setDescription("");
+    setSelectedTag(null);
+    setPassword("");
+    setConfirm("");
+    setPasswordVisible(false);
+    setConfirmPasswordVisible(false);
+    setTimeout(() => {
+      nameRef.current?.focus();
+    }, 100);
+  };
+
   if (!setupDone || objects.length < 3) {
     const availableTags = TAGS.filter(
       (tag) => !objects.find((obj) => obj.tag === tag.value)
     );
+
+    const showDevicePicker = async () => {
+      const permsGranted = await requestBlePermissionsCustom();
+      if (!permsGranted) return;
+      const perms = await actuallyRequestPermissions();
+      if (!perms) return;
+
+      setFoundDevices([]);
+      setDevicePickerVisible(true);
+      setPickerLoading(true);
+
+      let scanned: { [id: string]: Device } = {};
+      let timer: NodeJS.Timeout;
+
+      if (bleManager.current) {
+        bleManager.current.stopDeviceScan();
+      } else {
+        bleManager.current = new BleManager();
+      }
+
+      bleManager.current.startDeviceScan(
+        null,
+        { allowDuplicates: false },
+        (error, device) => {
+          if (error) {
+            setPickerLoading(false);
+            bleManager.current?.stopDeviceScan();
+            clearTimeout(timer);
+            return;
+          }
+          if (!device || !device.id) return;
+          if (typeof device.rssi === "number" && !scanned[device.id]) {
+            scanned[device.id] = device;
+            setFoundDevices((prev) => [...prev, device]);
+          }
+        }
+      );
+      timer = setTimeout(() => {
+        setPickerLoading(false);
+        bleManager.current?.stopDeviceScan();
+      }, 6000);
+    };
 
     const validate = () => {
       let err: { [key: string]: string } = {};
@@ -208,41 +334,47 @@ export default function HomeScreen() {
       return err;
     };
 
-    const onConfirm = async () => {
-      const err = validate();
-      setErrors(err);
-      if (Object.keys(err).length > 0) return;
+    const onDevicePick = async (device: Device) => {
+      setDevicePickerVisible(false);
+      const deviceId = device.id;
+      if (selectedTag && selectedTag in TAG_MAC_PATTERNS) {
+        const pattern = deviceId.substring(0, 3);
+        // @ts-ignore
+        TAG_MAC_PATTERNS[selectedTag] = pattern;
+      }
 
-      const obj = {
+      const obj: ObjectType = {
         name: name.trim(),
         description: description.trim(),
-        tag: selectedTag,
+        tag: selectedTag!,
         password,
+        deviceId: deviceId,
       };
+
       const updated = [...objects, obj];
       setObjects(updated);
       await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
       setModalMsg("Object added successfully!");
       setModalVisible(true);
-      setName("");
-      setDescription("");
-      setSelectedTag(null);
-      setPassword("");
-      setConfirm("");
+
+      resetForm();
+      setShowForm(true);
+
       setTimeout(() => setModalVisible(false), 1800);
+    };
+
+    const onConfirm = async () => {
+      const err = validate();
+      setErrors(err);
+      if (Object.keys(err).length > 0) return;
+      showDevicePicker();
     };
 
     const handleShowForm = () => {
       setShowForm(true);
-      setErrors({});
-      setName("");
-      setDescription("");
-      setSelectedTag(null);
-      setPassword("");
-      setConfirm("");
+      resetForm();
     };
 
-    // LIGHT MODE ONLY: no dark mode logic, always white backgrounds, black text, gray placeholder
     return (
       <SafeAreaView style={styles.container}>
         <KeyboardAvoidingView
@@ -277,65 +409,83 @@ export default function HomeScreen() {
                 <Text style={styles.title}>
                   Add Object ({objects.length}/3)
                 </Text>
-
                 <Text style={styles.label}>
                   Object name <Text style={{ color: "red" }}>*</Text>
                 </Text>
                 <TextInput
+                  ref={nameRef}
                   placeholder="Wallet"
                   placeholderTextColor="#888"
-                  style={styles.input}
+                  style={[
+                    styles.input,
+                    errors.name && { borderColor: "red", borderWidth: 1 },
+                  ]}
                   value={name}
                   onChangeText={setName}
+                  editable={true}
+                  returnKeyType="next"
+                  onSubmitEditing={() => descRef.current?.focus()}
                 />
                 {errors.name && <Text style={styles.err}>{errors.name}</Text>}
-
                 <Text style={styles.label}>Description</Text>
                 <TextInput
+                  ref={descRef}
                   placeholder="Write a very short description where you usually place this object."
                   placeholderTextColor="#888"
                   multiline
                   style={[styles.input, { height: 60 }]}
                   value={description}
                   onChangeText={setDescription}
+                  editable={true}
+                  returnKeyType="next"
+                  onSubmitEditing={() => passwordRef.current?.focus()}
                 />
-
                 <Text style={styles.label}>
                   Assign Tag <Text style={{ color: "red" }}>*</Text>
                 </Text>
-                <View style={styles.pickerWrapper}>
-                  <Picker
-                    selectedValue={selectedTag}
-                    onValueChange={(itemValue) => setSelectedTag(itemValue)}
-                    style={[
-                      styles.picker,
-                      { color: "#000", backgroundColor: "#fff" },
-                    ]}
-                    enabled={availableTags.length > 0}
-                    dropdownIconColor="#000"
-                    itemStyle={{ color: "#000", backgroundColor: "#fff" }}
-                  >
-                    <Picker.Item
-                      label="Select tag..."
-                      value={null}
-                      color="#000"
-                    />
-                    {availableTags.map((tag) => (
-                      <Picker.Item
-                        key={tag.value}
-                        label={tag.label}
-                        value={tag.value}
-                        color="#000"
-                      />
-                    ))}
-                  </Picker>
+                {/* --- Custom DropDownPicker for tags --- */}
+                <View style={{ marginBottom: 10, zIndex: 10 }}>
+                  <DropDownPicker
+                    open={tagPickerOpen}
+                    setOpen={setTagPickerOpen}
+                    value={selectedTag}
+                    setValue={setSelectedTag}
+                    items={availableTags.map((tag) => ({
+                      label: tag.label,
+                      value: tag.value,
+                    }))}
+                    setItems={setTagPickerItems}
+                    placeholder="Select tag..."
+                    style={{
+                      backgroundColor: "#fff",
+                      borderColor: errors.tag ? "red" : "#ddd",
+                    }}
+                    dropDownContainerStyle={{
+                      backgroundColor: "#fff",
+                      borderColor: errors.tag ? "red" : "#ddd",
+                    }}
+                    textStyle={{
+                      color: "#000",
+                    }}
+                    placeholderStyle={{
+                      color: "#888",
+                    }}
+                    listItemLabelStyle={{
+                      color: "#000",
+                    }}
+                    disabled={availableTags.length === 0}
+                  />
                 </View>
                 {errors.tag && <Text style={styles.err}>{errors.tag}</Text>}
-
                 <Text style={styles.label}>
                   Set Password <Text style={{ color: "red" }}>*</Text>
                 </Text>
-                <View style={styles.passwordField}>
+                <View
+                  style={[
+                    styles.passwordField,
+                    errors.password && { borderColor: "red", borderWidth: 1 },
+                  ]}
+                >
                   <Pressable onPress={() => setPasswordVisible((v) => !v)}>
                     <Ionicons
                       name={passwordVisible ? "eye" : "eye-off"}
@@ -344,23 +494,31 @@ export default function HomeScreen() {
                     />
                   </Pressable>
                   <TextInput
+                    ref={passwordRef}
                     placeholder="(maximum of 6 characters)"
                     placeholderTextColor="#888"
                     maxLength={6}
                     secureTextEntry={!passwordVisible}
-                    style={[styles.passwordInput, { color: "#222" }]}
+                    style={styles.passwordInput}
                     value={password}
                     onChangeText={setPassword}
+                    editable={true}
+                    returnKeyType="next"
+                    onSubmitEditing={() => confirmRef.current?.focus()}
                   />
                 </View>
                 {errors.password && (
                   <Text style={styles.err}>{errors.password}</Text>
                 )}
-
                 <Text style={styles.label}>
                   Confirm Password <Text style={{ color: "red" }}>*</Text>
                 </Text>
-                <View style={styles.passwordField}>
+                <View
+                  style={[
+                    styles.passwordField,
+                    errors.confirm && { borderColor: "red", borderWidth: 1 },
+                  ]}
+                >
                   <Pressable
                     onPress={() => setConfirmPasswordVisible((v) => !v)}
                     disabled={password.length === 0}
@@ -372,10 +530,11 @@ export default function HomeScreen() {
                     />
                   </Pressable>
                   <TextInput
+                    ref={confirmRef}
                     placeholder=""
                     placeholderTextColor="#888"
                     secureTextEntry={!confirmPasswordVisible}
-                    style={[styles.passwordInput, { color: "#222" }]}
+                    style={styles.passwordInput}
                     value={confirm}
                     onChangeText={setConfirm}
                     editable={password.length > 0}
@@ -384,7 +543,6 @@ export default function HomeScreen() {
                 {errors.confirm && (
                   <Text style={styles.err}>{errors.confirm}</Text>
                 )}
-
                 <TouchableOpacity
                   style={[
                     styles.confirmButton,
@@ -397,13 +555,130 @@ export default function HomeScreen() {
                 </TouchableOpacity>
               </View>
             )}
-            <View style={{ height: 20 }} /> {/* Spacer for keyboard */}
+            <View style={{ height: 20 }} />
           </ScrollView>
           <Text style={styles.footer}>
             Search It, 2025. All Rights Reserved.
           </Text>
         </KeyboardAvoidingView>
-
+        {/* --- Custom white permission modal --- */}
+        <Modal
+          visible={permissionModalVisible}
+          transparent={true}
+          animationType="fade"
+          onRequestClose={() => {
+            setPermissionModalVisible(false);
+            if (pendingPermissionResolve) {
+              pendingPermissionResolve(false);
+              setPendingPermissionResolve(null);
+            }
+          }}
+        >
+          <View style={styles.modalBg}>
+            <View style={styles.customModalWhite}>
+              <Text style={styles.customModalTitle}>Permissions Required</Text>
+              <Text style={styles.customModalText}>
+                This app needs Bluetooth and Location permissions to scan for
+                BLE tags. Proceed?
+              </Text>
+              <View style={styles.customModalActions}>
+                <TouchableOpacity
+                  style={[
+                    styles.customModalBtn,
+                    { backgroundColor: "#fff", borderColor: "#247eff" },
+                  ]}
+                  onPress={() => {
+                    setPermissionModalVisible(false);
+                    if (pendingPermissionResolve) {
+                      pendingPermissionResolve(false);
+                      setPendingPermissionResolve(null);
+                    }
+                  }}
+                >
+                  <Text style={{ color: "#247eff", fontWeight: "bold" }}>
+                    Cancel
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.customModalBtn,
+                    { backgroundColor: "#247eff" },
+                  ]}
+                  onPress={() => {
+                    setPermissionModalVisible(false);
+                    if (pendingPermissionResolve) {
+                      pendingPermissionResolve(true);
+                      setPendingPermissionResolve(null);
+                    }
+                  }}
+                >
+                  <Text style={{ color: "#fff", fontWeight: "bold" }}>
+                    Continue
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+        {/* --- Custom white grant modal --- */}
+        <Modal
+          visible={grantModalVisible}
+          transparent={true}
+          animationType="fade"
+          onRequestClose={() => {
+            setGrantModalVisible(false);
+            if (pendingGrantResolve) {
+              pendingGrantResolve(false);
+              setPendingGrantResolve(null);
+            }
+          }}
+        >
+          <View style={styles.modalBg}>
+            <View style={styles.customModalWhite}>
+              <Text style={styles.customModalTitle}>Grant Permissions</Text>
+              <Text style={styles.customModalText}>
+                The system will now ask for Bluetooth and Location permissions.
+                Please allow these for correct operation.
+              </Text>
+              <View style={styles.customModalActions}>
+                <TouchableOpacity
+                  style={[
+                    styles.customModalBtn,
+                    { backgroundColor: "#fff", borderColor: "#247eff" },
+                  ]}
+                  onPress={() => {
+                    setGrantModalVisible(false);
+                    if (pendingGrantResolve) {
+                      pendingGrantResolve(false);
+                      setPendingGrantResolve(null);
+                    }
+                  }}
+                >
+                  <Text style={{ color: "#247eff", fontWeight: "bold" }}>
+                    Cancel
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.customModalBtn,
+                    { backgroundColor: "#247eff" },
+                  ]}
+                  onPress={() => {
+                    setGrantModalVisible(false);
+                    if (pendingGrantResolve) {
+                      pendingGrantResolve(true);
+                      setPendingGrantResolve(null);
+                    }
+                  }}
+                >
+                  <Text style={{ color: "#fff", fontWeight: "bold" }}>
+                    Grant
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
         <Modal
           visible={modalVisible}
           transparent={true}
@@ -417,11 +692,80 @@ export default function HomeScreen() {
             </View>
           </View>
         </Modal>
+        <Modal
+          visible={devicePickerVisible}
+          transparent={true}
+          animationType="slide"
+          onRequestClose={() => setDevicePickerVisible(false)}
+        >
+          <View style={styles.devicePickerBg}>
+            <View style={styles.devicePickerContainer}>
+              <Text style={styles.pickerTitle}>
+                Select the correct BLE device for this object
+              </Text>
+              {pickerLoading ? (
+                <Text style={styles.pickerLoading}>
+                  Scanning nearby devices...
+                </Text>
+              ) : foundDevices.length === 0 ? (
+                <Text style={styles.pickerLoading}>
+                  No devices found. Try again.
+                </Text>
+              ) : (
+                <FlatList
+                  data={foundDevices}
+                  keyExtractor={(item) => item.id}
+                  renderItem={({ item }) => (
+                    <TouchableOpacity
+                      style={styles.deviceItem}
+                      onPress={() => onDevicePick(item)}
+                    >
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ fontWeight: "bold" }}>
+                          {item.name || item.localName || "Unnamed"}
+                        </Text>
+                        <Text style={{ fontSize: 13, color: "#666" }}>
+                          {item.id}
+                        </Text>
+                      </View>
+                      <Text style={{ fontWeight: "bold", color: "#247eff" }}>
+                        RSSI: {item.rssi}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+                  ListFooterComponent={
+                    <TouchableOpacity
+                      style={styles.rescanButton}
+                      onPress={() => {
+                        setFoundDevices([]);
+                        setPickerLoading(true);
+                        if (bleManager.current)
+                          bleManager.current.stopDeviceScan();
+                        showDevicePicker();
+                      }}
+                    >
+                      <Ionicons name="refresh" size={18} color="#247eff" />
+                      <Text style={{ color: "#247eff", marginLeft: 6 }}>
+                        Scan again
+                      </Text>
+                    </TouchableOpacity>
+                  }
+                />
+              )}
+              <TouchableOpacity
+                style={styles.cancelButton}
+                onPress={() => setDevicePickerVisible(false)}
+              >
+                <Text style={styles.cancelButtonText}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
       </SafeAreaView>
     );
   }
 
-  // --- EXISTING OBJECTS LIST SCREEN (Landing page after setup) ---
+  // Main objects list screen
   return (
     <SafeAreaView style={styles.containerNoPad}>
       <ScrollView contentContainerStyle={{ flexGrow: 1 }}>
@@ -435,33 +779,41 @@ export default function HomeScreen() {
         <Text style={styles.selectLabel}>Select Object</Text>
         <View style={styles.objectListWrapper}>
           {objects.map((obj, idx) => {
-            // Use RSSI from BLE scan, or null if not detected
             const rssi = obj.tag in rssiMap ? rssiMap[obj.tag] : null;
-            const signal = getSignalIcon(rssi);
+            const signal = getSignalIcon(rssi, bluetoothOff);
             return (
               <View style={styles.objectItem} key={obj.tag}>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.objectName}>{obj.name}</Text>
                   <Text style={styles.objectDesc}>{obj.description}</Text>
+                  <Text style={styles.deviceIdLabel}>
+                    {obj.deviceId
+                      ? `Device: ${obj.deviceId}`
+                      : "No device assigned"}
+                  </Text>
                 </View>
                 <View style={styles.signalSection}>
                   <Text
                     style={[
                       styles.signalValue,
                       { color: signal.color },
-                      rssi === null && { color: "#666" },
+                      (rssi === null || bluetoothOff) && {
+                        color: signal.color,
+                      },
                     ]}
                   >
-                    {rssi !== null ? `${rssi}` : "n/a"}
+                    {rssi !== null && !bluetoothOff ? `${rssi}` : "n/a"}
                   </Text>
                   <Text
                     style={[
                       styles.signalLabel,
                       { color: signal.color },
-                      rssi === null && { color: "#666" },
+                      (rssi === null || bluetoothOff) && {
+                        color: signal.color,
+                      },
                     ]}
                   >
-                    {rssi !== null ? `(${signal.label})` : ""}
+                    {rssi !== null && !bluetoothOff ? `(${signal.label})` : ""}
                   </Text>
                 </View>
                 <Ionicons
@@ -478,6 +830,116 @@ export default function HomeScreen() {
         <View style={{ flex: 1 }} />
         <Text style={styles.footer}>Search It, 2025. All Rights Reserved.</Text>
       </ScrollView>
+      {/* --- Custom white permission modal (for list screen if needed) --- */}
+      <Modal
+        visible={permissionModalVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => {
+          setPermissionModalVisible(false);
+          if (pendingPermissionResolve) {
+            pendingPermissionResolve(false);
+            setPendingPermissionResolve(null);
+          }
+        }}
+      >
+        <View style={styles.modalBg}>
+          <View style={styles.customModalWhite}>
+            <Text style={styles.customModalTitle}>Permissions Required</Text>
+            <Text style={styles.customModalText}>
+              This app needs Bluetooth and Location permissions to scan for BLE
+              tags. Proceed?
+            </Text>
+            <View style={styles.customModalActions}>
+              <TouchableOpacity
+                style={[
+                  styles.customModalBtn,
+                  { backgroundColor: "#fff", borderColor: "#247eff" },
+                ]}
+                onPress={() => {
+                  setPermissionModalVisible(false);
+                  if (pendingPermissionResolve) {
+                    pendingPermissionResolve(false);
+                    setPendingPermissionResolve(null);
+                  }
+                }}
+              >
+                <Text style={{ color: "#247eff", fontWeight: "bold" }}>
+                  Cancel
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.customModalBtn, { backgroundColor: "#247eff" }]}
+                onPress={() => {
+                  setPermissionModalVisible(false);
+                  if (pendingPermissionResolve) {
+                    pendingPermissionResolve(true);
+                    setPendingPermissionResolve(null);
+                  }
+                }}
+              >
+                <Text style={{ color: "#fff", fontWeight: "bold" }}>
+                  Continue
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+      {/* --- Custom white grant modal (for list screen if needed) --- */}
+      <Modal
+        visible={grantModalVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => {
+          setGrantModalVisible(false);
+          if (pendingGrantResolve) {
+            pendingGrantResolve(false);
+            setPendingGrantResolve(null);
+          }
+        }}
+      >
+        <View style={styles.modalBg}>
+          <View style={styles.customModalWhite}>
+            <Text style={styles.customModalTitle}>Grant Permissions</Text>
+            <Text style={styles.customModalText}>
+              The system will now ask for Bluetooth and Location permissions.
+              Please allow these for correct operation.
+            </Text>
+            <View style={styles.customModalActions}>
+              <TouchableOpacity
+                style={[
+                  styles.customModalBtn,
+                  { backgroundColor: "#fff", borderColor: "#247eff" },
+                ]}
+                onPress={() => {
+                  setGrantModalVisible(false);
+                  if (pendingGrantResolve) {
+                    pendingGrantResolve(false);
+                    setPendingGrantResolve(null);
+                  }
+                }}
+              >
+                <Text style={{ color: "#247eff", fontWeight: "bold" }}>
+                  Cancel
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.customModalBtn, { backgroundColor: "#247eff" }]}
+                onPress={() => {
+                  setGrantModalVisible(false);
+                  if (pendingGrantResolve) {
+                    pendingGrantResolve(true);
+                    setPendingGrantResolve(null);
+                  }
+                }}
+              >
+                <Text style={{ color: "#fff", fontWeight: "bold" }}>Grant</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -535,6 +997,11 @@ const styles = StyleSheet.create({
     fontSize: 14,
     marginTop: 2,
   },
+  deviceIdLabel: {
+    fontSize: 11,
+    color: "#888",
+    marginTop: 2,
+  },
   signalSection: {
     minWidth: 72,
     alignItems: "flex-end",
@@ -578,14 +1045,6 @@ const styles = StyleSheet.create({
     marginBottom: 6,
     fontSize: 16,
   },
-  pickerWrapper: {
-    backgroundColor: "#fff",
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: "#ddd",
-    marginBottom: 10,
-  },
-  picker: { height: 50, color: "#000", backgroundColor: "#fff" },
   passwordField: {
     flexDirection: "row",
     alignItems: "center",
@@ -618,6 +1077,43 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     alignItems: "center",
   },
+  customModalWhite: {
+    backgroundColor: "#fff",
+    borderRadius: 16,
+    padding: 24,
+    width: 320,
+    alignItems: "center",
+    elevation: 6,
+  },
+  customModalTitle: {
+    fontWeight: "bold",
+    fontSize: 20,
+    color: "#247eff",
+    marginBottom: 8,
+    textAlign: "center",
+  },
+  customModalText: {
+    color: "#000",
+    fontSize: 16,
+    marginBottom: 20,
+    textAlign: "center",
+  },
+  customModalActions: {
+    flexDirection: "row",
+    width: "100%",
+    justifyContent: "space-between",
+    marginTop: 8,
+  },
+  customModalBtn: {
+    flex: 1,
+    borderRadius: 8,
+    marginHorizontal: 6,
+    paddingVertical: 12,
+    paddingHorizontal: 0,
+    borderWidth: 1,
+    borderColor: "#247eff",
+    alignItems: "center",
+  },
   modalContent: {
     backgroundColor: "#fff",
     borderRadius: 14,
@@ -635,5 +1131,65 @@ const styles = StyleSheet.create({
     color: "#247eff",
     fontWeight: "bold",
     textAlign: "center",
+  },
+  devicePickerBg: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.08)",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  devicePickerContainer: {
+    backgroundColor: "#fff",
+    borderRadius: 16,
+    paddingVertical: 20,
+    paddingHorizontal: 16,
+    width: "85%",
+    maxHeight: "70%",
+    alignItems: "stretch",
+  },
+  pickerTitle: {
+    fontWeight: "bold",
+    fontSize: 17,
+    color: "#247eff",
+    marginBottom: 8,
+    textAlign: "center",
+  },
+  pickerLoading: {
+    fontStyle: "italic",
+    color: "#888",
+    textAlign: "center",
+    marginVertical: 24,
+  },
+  deviceItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#f7faff",
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 8,
+    borderColor: "#e1eaff",
+    borderWidth: 1,
+  },
+  rescanButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 16,
+    padding: 8,
+    alignSelf: "center",
+    backgroundColor: "#eef5ff",
+    borderRadius: 8,
+  },
+  cancelButton: {
+    marginTop: 10,
+    alignSelf: "center",
+    backgroundColor: "#eee",
+    borderRadius: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  cancelButtonText: {
+    color: "#888",
+    fontWeight: "bold",
+    fontSize: 15,
   },
 });
