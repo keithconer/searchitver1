@@ -37,6 +37,7 @@ const TAG_MAC_PATTERNS = {
 
 const STORAGE_KEY = "@searchit_objects";
 const SETUP_DONE_KEY = "@searchit_setup_done";
+const PERMISSIONS_REQUESTED_KEY = "@searchit_permissions_requested";
 
 const getSignalIcon = (rssi: number | null, bluetoothOff: boolean = false) => {
   if (bluetoothOff || rssi === null)
@@ -68,9 +69,26 @@ export default function HomeScreen() {
   const [successModalVisible, setSuccessModalVisible] = useState(false);
   const [errors, setErrors] = useState<{ [key: string]: string }>({});
   const [setupDone, setSetupDone] = useState(false);
+  const [permissionsRequested, setPermissionsRequested] = useState(false);
 
   // This state controls whether to show the welcome screen or the form
   const [showForm, setShowForm] = useState(false);
+
+  // States for authentication and editing
+  const [authModalVisible, setAuthModalVisible] = useState(false);
+  const [incorrectPasswordModalVisible, setIncorrectPasswordModalVisible] =
+    useState(false);
+  const [editModalVisible, setEditModalVisible] = useState(false);
+  const [authPassword, setAuthPassword] = useState("");
+  const [authPasswordVisible, setAuthPasswordVisible] = useState(false);
+  const [selectedObject, setSelectedObject] = useState<ObjectType | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+  const [editPassword, setEditPassword] = useState("");
+  const [editConfirm, setEditConfirm] = useState("");
+  const [editPasswordVisible, setEditPasswordVisible] = useState(false);
+  const [editConfirmVisible, setEditConfirmVisible] = useState(false);
+  const [editErrors, setEditErrors] = useState<{ [key: string]: string }>({});
 
   const [rssiMap, setRssiMap] = useState<{ [tag: string]: number | null }>({});
   const [bluetoothOff, setBluetoothOff] = useState(false);
@@ -93,6 +111,11 @@ export default function HomeScreen() {
   const descRef = useRef<TextInput>(null);
   const passwordRef = useRef<TextInput>(null);
   const confirmRef = useRef<TextInput>(null);
+  const authPasswordRef = useRef<TextInput>(null);
+  const editNameRef = useRef<TextInput>(null);
+  const editDescRef = useRef<TextInput>(null);
+  const editPasswordRef = useRef<TextInput>(null);
+  const editConfirmRef = useRef<TextInput>(null);
 
   // For DropDownPicker - fixed TypeScript issues
   const [tagPickerOpen, setTagPickerOpen] = useState(false);
@@ -100,6 +123,14 @@ export default function HomeScreen() {
 
   // Custom BLE permission request (returns true if granted)
   async function requestBlePermissionsCustom(): Promise<boolean> {
+    // Check if permissions were already requested
+    const alreadyRequested = await AsyncStorage.getItem(
+      PERMISSIONS_REQUESTED_KEY
+    );
+    if (alreadyRequested === "true") {
+      return true;
+    }
+
     if (Platform.OS === "android") {
       // Show custom permission modal first (white bg, black text)
       return await new Promise<boolean>((resolve) => {
@@ -112,6 +143,14 @@ export default function HomeScreen() {
 
   // Custom grant modal before system permission dialog
   async function showGrantModal(): Promise<boolean> {
+    // Check if permissions were already requested
+    const alreadyRequested = await AsyncStorage.getItem(
+      PERMISSIONS_REQUESTED_KEY
+    );
+    if (alreadyRequested === "true") {
+      return true;
+    }
+
     return await new Promise<boolean>((resolve) => {
       setGrantModalVisible(true);
       setPendingGrantResolve(() => resolve);
@@ -119,6 +158,14 @@ export default function HomeScreen() {
   }
 
   async function actuallyRequestPermissions(): Promise<boolean> {
+    // Check if permissions were already requested
+    const alreadyRequested = await AsyncStorage.getItem(
+      PERMISSIONS_REQUESTED_KEY
+    );
+    if (alreadyRequested === "true") {
+      return true;
+    }
+
     if (Platform.OS === "android") {
       try {
         // Show custom "Grant permissions" modal before system dialog
@@ -132,20 +179,44 @@ export default function HomeScreen() {
             PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
           ];
           const result = await PermissionsAndroid.requestMultiple(permissions);
-          return Object.values(result).every(
+          const granted = Object.values(result).every(
             (status) => status === PermissionsAndroid.RESULTS.GRANTED
           );
+
+          if (granted) {
+            // Mark permissions as requested
+            await AsyncStorage.setItem(PERMISSIONS_REQUESTED_KEY, "true");
+            setPermissionsRequested(true);
+          }
+
+          return granted;
         } else if (Platform.Version >= 23) {
           const result = await PermissionsAndroid.request(
             PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION
           );
-          return result === PermissionsAndroid.RESULTS.GRANTED;
+          const granted = result === PermissionsAndroid.RESULTS.GRANTED;
+
+          if (granted) {
+            // Mark permissions as requested
+            await AsyncStorage.setItem(PERMISSIONS_REQUESTED_KEY, "true");
+            setPermissionsRequested(true);
+          }
+
+          return granted;
         }
+
+        // Mark permissions as requested for older Android versions
+        await AsyncStorage.setItem(PERMISSIONS_REQUESTED_KEY, "true");
+        setPermissionsRequested(true);
         return true;
       } catch (err) {
         return false;
       }
     }
+
+    // Mark permissions as requested for iOS
+    await AsyncStorage.setItem(PERMISSIONS_REQUESTED_KEY, "true");
+    setPermissionsRequested(true);
     return true;
   }
 
@@ -167,6 +238,13 @@ export default function HomeScreen() {
       if (done) {
         setSetupDone(true);
       }
+
+      const permissionsRequested = await AsyncStorage.getItem(
+        PERMISSIONS_REQUESTED_KEY
+      );
+      if (permissionsRequested === "true") {
+        setPermissionsRequested(true);
+      }
     })();
   }, []);
 
@@ -174,10 +252,12 @@ export default function HomeScreen() {
   useEffect(() => {
     const requestPermissionsAfterSetup = async () => {
       if (objects.length === 3 && !setupDone) {
-        // Request permissions
-        const permsGranted = await requestBlePermissionsCustom();
-        if (permsGranted) {
-          await actuallyRequestPermissions();
+        // Request permissions only if not already requested
+        if (!permissionsRequested) {
+          const permsGranted = await requestBlePermissionsCustom();
+          if (permsGranted) {
+            await actuallyRequestPermissions();
+          }
         }
 
         // Mark setup as done
@@ -187,7 +267,7 @@ export default function HomeScreen() {
     };
 
     requestPermissionsAfterSetup();
-  }, [objects, setupDone]);
+  }, [objects, setupDone, permissionsRequested]);
 
   const getTagForDevice = (deviceId: string): string | null => {
     const exactMatch = objects.find((obj) => obj.deviceId === deviceId);
@@ -223,10 +303,13 @@ export default function HomeScreen() {
     }, true);
 
     async function startBleScan() {
-      const permsGranted = await requestBlePermissionsCustom();
-      if (!permsGranted) return;
-      const perms = await actuallyRequestPermissions();
-      if (!perms) return;
+      // Only request permissions if not already requested
+      if (!permissionsRequested) {
+        const permsGranted = await requestBlePermissionsCustom();
+        if (!permsGranted) return;
+        const perms = await actuallyRequestPermissions();
+        if (!perms) return;
+      }
 
       const initialRssiMap = Object.fromEntries(
         objects.map((obj) => [obj.tag, null])
@@ -249,9 +332,11 @@ export default function HomeScreen() {
 
           if (!device || !device.id) return;
 
+          // Find which tag this device belongs to
           const matchedTag = getTagForDevice(device.id);
 
           if (matchedTag) {
+            // Only update RSSI for the specific tag this device is assigned to
             setRssiMap((prev) => ({
               ...prev,
               [matchedTag]: device.rssi,
@@ -281,7 +366,7 @@ export default function HomeScreen() {
       appStateSubscription && appStateSubscription.remove();
       stateSubscription && stateSubscription.remove();
     };
-  }, [setupDone, objects.length, objects]);
+  }, [setupDone, objects.length, objects, permissionsRequested]);
 
   // always reset all refs and their values after adding an object
   const resetForm = () => {
@@ -302,6 +387,80 @@ export default function HomeScreen() {
   const handleShowForm = () => {
     setShowForm(true);
     resetForm();
+  };
+
+  // Handle authentication when clicking the 3-dot icon
+  const handleAuthRequest = (obj: ObjectType) => {
+    setSelectedObject(obj);
+    setAuthPassword("");
+    setAuthPasswordVisible(false);
+    setAuthModalVisible(true);
+    setTimeout(() => {
+      authPasswordRef.current?.focus();
+    }, 100);
+  };
+
+  // Handle authentication submission
+  const handleAuthSubmit = () => {
+    if (!selectedObject) return;
+
+    if (authPassword === selectedObject.password) {
+      // Password correct, show edit modal
+      setAuthModalVisible(false);
+      setEditName(selectedObject.name);
+      setEditDescription(selectedObject.description || "");
+      setEditPassword("");
+      setEditConfirm("");
+      setEditPasswordVisible(false);
+      setEditConfirmVisible(false);
+      setEditErrors({});
+      setEditModalVisible(true);
+      setTimeout(() => {
+        editNameRef.current?.focus();
+      }, 100);
+    } else {
+      // Password incorrect, show error modal
+      setAuthModalVisible(false);
+      setIncorrectPasswordModalVisible(true);
+    }
+  };
+
+  // Handle edit form submission
+  const handleEditSubmit = async () => {
+    if (!selectedObject) return;
+
+    // Validate edit form
+    let err: { [key: string]: string } = {};
+    if (!editName.trim()) err.name = "Object name is required";
+    if (editPassword && editPassword.length > 6)
+      err.password = "Password must be 1-6 characters";
+    if (editPassword && !editConfirm)
+      err.confirm = "Confirm password is required";
+    if (editPassword && editConfirm !== editPassword)
+      err.confirm = "Passwords do not match";
+
+    setEditErrors(err);
+    if (Object.keys(err).length > 0) return;
+
+    // Update object
+    const updatedObjects = objects.map((obj) => {
+      if (obj.tag === selectedObject.tag) {
+        return {
+          ...obj,
+          name: editName.trim(),
+          description: editDescription.trim(),
+          password: editPassword ? editPassword : obj.password,
+        };
+      }
+      return obj;
+    });
+
+    setObjects(updatedObjects);
+    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updatedObjects));
+
+    // Close edit modal
+    setEditModalVisible(false);
+    setSelectedObject(null);
   };
 
   // Setup process screen (adding objects)
@@ -737,7 +896,9 @@ export default function HomeScreen() {
                   color={signal.color}
                   style={{ marginHorizontal: 4 }}
                 />
-                <Ionicons name="ellipsis-horizontal" size={22} color="#666" />
+                <TouchableOpacity onPress={() => handleAuthRequest(obj)}>
+                  <Ionicons name="ellipsis-horizontal" size={22} color="#666" />
+                </TouchableOpacity>
               </View>
             );
           })}
@@ -746,9 +907,217 @@ export default function HomeScreen() {
         <Text style={styles.footer}>Search It, 2025. All Rights Reserved.</Text>
       </ScrollView>
 
+      {/* --- Authentication Modal --- */}
+      <Modal
+        visible={authModalVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setAuthModalVisible(false)}
+      >
+        <View style={styles.modalBg}>
+          <View style={styles.authModalContent}>
+            <Ionicons
+              name="lock-closed"
+              size={32}
+              color="#247eff"
+              style={styles.authIcon}
+            />
+            <Text style={styles.authModalTitle}>Authentication</Text>
+            <Text style={styles.authModalText}>
+              kindly input your registered password on this specific tag
+            </Text>
+            <View style={styles.authPasswordField}>
+              <Pressable onPress={() => setAuthPasswordVisible((v) => !v)}>
+                <Ionicons
+                  name={authPasswordVisible ? "eye" : "eye-off"}
+                  size={18}
+                  color="#999"
+                />
+              </Pressable>
+              <TextInput
+                ref={authPasswordRef}
+                placeholder=""
+                placeholderTextColor="#888"
+                secureTextEntry={!authPasswordVisible}
+                style={styles.authPasswordInput}
+                value={authPassword}
+                onChangeText={setAuthPassword}
+                maxLength={6}
+              />
+            </View>
+            <TouchableOpacity
+              style={styles.authConfirmButton}
+              onPress={handleAuthSubmit}
+            >
+              <Text style={styles.authConfirmButtonText}>Confirm</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* --- Incorrect Password Modal --- */}
+      <Modal
+        visible={incorrectPasswordModalVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setIncorrectPasswordModalVisible(false)}
+      >
+        <View style={styles.modalBg}>
+          <View style={styles.authModalContent}>
+            <Ionicons
+              name="lock-closed"
+              size={32}
+              color="#ff3b30"
+              style={styles.incorrectAuthIcon}
+            />
+            <Text style={styles.incorrectAuthTitle}>Incorrect Password</Text>
+            <Text style={styles.authModalText}>
+              kindly try to remember your password
+            </Text>
+            <TouchableOpacity
+              style={styles.authConfirmButton}
+              onPress={() => {
+                setIncorrectPasswordModalVisible(false);
+                setAuthModalVisible(true);
+              }}
+            >
+              <Text style={styles.authConfirmButtonText}>Try Again</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.goBackButton}
+              onPress={() => setIncorrectPasswordModalVisible(false)}
+            >
+              <Text style={styles.goBackButtonText}>Go back</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* --- Edit Tag Details Modal --- */}
+      <Modal
+        visible={editModalVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setEditModalVisible(false)}
+      >
+        <View style={styles.modalBg}>
+          <View style={styles.editModalContent}>
+            <Text style={styles.editModalTitle}>Edit Tag Details</Text>
+
+            <Text style={styles.editLabel}>Object name</Text>
+            <TextInput
+              ref={editNameRef}
+              placeholder="Wallet"
+              placeholderTextColor="#888"
+              style={[
+                styles.editInput,
+                editErrors.name && { borderColor: "red", borderWidth: 1 },
+              ]}
+              value={editName}
+              onChangeText={setEditName}
+              returnKeyType="next"
+              onSubmitEditing={() => editDescRef.current?.focus()}
+            />
+            {editErrors.name && (
+              <Text style={styles.err}>{editErrors.name}</Text>
+            )}
+
+            <Text style={styles.editLabel}>Description</Text>
+            <TextInput
+              ref={editDescRef}
+              placeholder="Write a very short description where you usually place this object."
+              placeholderTextColor="#888"
+              multiline
+              style={[styles.editInput, { height: 60 }]}
+              value={editDescription}
+              onChangeText={setEditDescription}
+              returnKeyType="next"
+              onSubmitEditing={() => editPasswordRef.current?.focus()}
+            />
+
+            <Text style={styles.editLabel}>Set Password</Text>
+            <View
+              style={[
+                styles.passwordField,
+                editErrors.password && { borderColor: "red", borderWidth: 1 },
+              ]}
+            >
+              <Pressable onPress={() => setEditPasswordVisible((v) => !v)}>
+                <Ionicons
+                  name={editPasswordVisible ? "eye" : "eye-off"}
+                  size={18}
+                  color="#999"
+                />
+              </Pressable>
+              <TextInput
+                ref={editPasswordRef}
+                placeholder="(maximum of 6 characters)"
+                placeholderTextColor="#888"
+                maxLength={6}
+                secureTextEntry={!editPasswordVisible}
+                style={styles.passwordInput}
+                value={editPassword}
+                onChangeText={setEditPassword}
+                returnKeyType="next"
+                onSubmitEditing={() => editConfirmRef.current?.focus()}
+              />
+            </View>
+            {editErrors.password && (
+              <Text style={styles.err}>{editErrors.password}</Text>
+            )}
+
+            <Text style={styles.editLabel}>Confirm Password</Text>
+            <View
+              style={[
+                styles.passwordField,
+                editErrors.confirm && { borderColor: "red", borderWidth: 1 },
+              ]}
+            >
+              <Pressable
+                onPress={() => setEditConfirmVisible((v) => !v)}
+                disabled={editPassword.length === 0}
+              >
+                <Ionicons
+                  name={editConfirmVisible ? "eye" : "eye-off"}
+                  size={18}
+                  color={editPassword.length === 0 ? "#ccc" : "#999"}
+                />
+              </Pressable>
+              <TextInput
+                ref={editConfirmRef}
+                placeholder=""
+                placeholderTextColor="#888"
+                secureTextEntry={!editConfirmVisible}
+                style={styles.passwordInput}
+                value={editConfirm}
+                onChangeText={setEditConfirm}
+                editable={editPassword.length > 0}
+              />
+            </View>
+            {editErrors.confirm && (
+              <Text style={styles.err}>{editErrors.confirm}</Text>
+            )}
+
+            <TouchableOpacity
+              style={styles.updateButton}
+              onPress={handleEditSubmit}
+            >
+              <Text style={styles.updateButtonText}>Update Tag Details</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.goBackButton}
+              onPress={() => setEditModalVisible(false)}
+            >
+              <Text style={styles.goBackButtonText}>Go back</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
       {/* --- Permission modals for main screen --- */}
       <Modal
-        visible={permissionModalVisible}
+        visible={permissionModalVisible && !permissionsRequested}
         transparent={true}
         animationType="fade"
         onRequestClose={() => {
@@ -804,7 +1173,7 @@ export default function HomeScreen() {
       </Modal>
 
       <Modal
-        visible={grantModalVisible}
+        visible={grantModalVisible && !permissionsRequested}
         transparent={true}
         animationType="fade"
         onRequestClose={() => {
@@ -1073,6 +1442,141 @@ const styles = StyleSheet.create({
     width: "100%",
   },
   successModalButtonText: {
+    color: "#fff",
+    fontWeight: "bold",
+    fontSize: 16,
+    textAlign: "center",
+  },
+
+  // Authentication modal styles
+  authModalContent: {
+    backgroundColor: "#fff",
+    borderRadius: 14,
+    padding: 24,
+    width: 300,
+    alignItems: "center",
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  authIcon: {
+    marginBottom: 16,
+  },
+  incorrectAuthIcon: {
+    marginBottom: 16,
+  },
+  authModalTitle: {
+    fontSize: 20,
+    fontWeight: "bold",
+    color: "#247eff",
+    marginBottom: 12,
+  },
+  incorrectAuthTitle: {
+    fontSize: 20,
+    fontWeight: "bold",
+    color: "#ff3b30",
+    marginBottom: 12,
+  },
+  authModalText: {
+    fontSize: 14,
+    color: "#555",
+    textAlign: "center",
+    marginBottom: 20,
+    lineHeight: 20,
+  },
+  authPasswordField: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#f2f2f2",
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    borderWidth: 1,
+    borderColor: "#ddd",
+    marginBottom: 20,
+    width: "100%",
+  },
+  authPasswordInput: {
+    flex: 1,
+    padding: 10,
+    color: "#222",
+  },
+  authConfirmButton: {
+    backgroundColor: "#247eff",
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    borderRadius: 8,
+    width: "100%",
+    marginBottom: 10,
+  },
+  authConfirmButtonText: {
+    color: "#fff",
+    fontWeight: "bold",
+    fontSize: 16,
+    textAlign: "center",
+  },
+  goBackButton: {
+    backgroundColor: "#fff",
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    borderRadius: 8,
+    width: "100%",
+    borderWidth: 1,
+    borderColor: "#ddd",
+  },
+  goBackButtonText: {
+    color: "#555",
+    fontWeight: "bold",
+    fontSize: 16,
+    textAlign: "center",
+  },
+
+  // Edit modal styles
+  editModalContent: {
+    backgroundColor: "#fff",
+    borderRadius: 14,
+    padding: 24,
+    width: 320,
+    maxHeight: "90%",
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  editModalTitle: {
+    fontSize: 20,
+    fontWeight: "bold",
+    color: "#247eff",
+    marginBottom: 16,
+    textAlign: "center",
+  },
+  editLabel: {
+    fontWeight: "bold",
+    marginBottom: 6,
+    color: "#222",
+  },
+  editInput: {
+    backgroundColor: "#f2f2f2",
+    color: "#222",
+    borderRadius: 6,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: "#ddd",
+    marginBottom: 12,
+    fontSize: 16,
+  },
+  updateButton: {
+    backgroundColor: "#247eff",
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    borderRadius: 8,
+    width: "100%",
+    marginTop: 10,
+    marginBottom: 10,
+  },
+  updateButtonText: {
     color: "#fff",
     fontWeight: "bold",
     fontSize: 16,
