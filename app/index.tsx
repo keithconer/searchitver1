@@ -3,7 +3,6 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useEffect, useRef, useState } from "react";
 import {
   AppState,
-  FlatList,
   Image,
   KeyboardAvoidingView,
   Modal,
@@ -17,11 +16,14 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import { BleManager, State as BleState, Device } from "react-native-ble-plx";
-import DropDownPicker from "react-native-dropdown-picker";
+import { BleManager, State as BleState } from "react-native-ble-plx";
+import DropDownPicker, { ItemType } from "react-native-dropdown-picker";
 import { SafeAreaView } from "react-native-safe-area-context";
 
-const TAGS = [
+// Define tag type to match DropDownPicker's ItemType
+type TagType = ItemType<string>;
+
+const TAGS: TagType[] = [
   { label: "ESP32 C3mini (Tag 1)", value: "tag1" },
   { label: "ESP32 Wroom (Tag 2)", value: "tag2" },
   { label: "ESP32 CAM (Tag 3)", value: "tag3" },
@@ -55,7 +57,6 @@ type ObjectType = {
 };
 
 export default function HomeScreen() {
-  const [showForm, setShowForm] = useState(false);
   const [objects, setObjects] = useState<ObjectType[]>([]);
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [name, setName] = useState("");
@@ -64,24 +65,18 @@ export default function HomeScreen() {
   const [confirm, setConfirm] = useState("");
   const [passwordVisible, setPasswordVisible] = useState(false);
   const [confirmPasswordVisible, setConfirmPasswordVisible] = useState(false);
-  const [modalVisible, setModalVisible] = useState(false);
-  const [modalMsg, setModalMsg] = useState("");
+  const [successModalVisible, setSuccessModalVisible] = useState(false);
   const [errors, setErrors] = useState<{ [key: string]: string }>({});
   const [setupDone, setSetupDone] = useState(false);
+
+  // This state controls whether to show the welcome screen or the form
+  const [showForm, setShowForm] = useState(false);
 
   const [rssiMap, setRssiMap] = useState<{ [tag: string]: number | null }>({});
   const [bluetoothOff, setBluetoothOff] = useState(false);
   const bleManager = useRef<BleManager | null>(null);
 
-  const [foundDevices, setFoundDevices] = useState<Device[]>([]);
-  const [devicePickerVisible, setDevicePickerVisible] = useState(false);
-  const [pickerLoading, setPickerLoading] = useState(false);
-
-  // For custom picker
-  const [tagPickerOpen, setTagPickerOpen] = useState(false);
-  const [tagPickerItems, setTagPickerItems] = useState(TAGS);
-
-  // For custom modal (permission)
+  // For permission modals
   const [permissionModalVisible, setPermissionModalVisible] = useState(false);
   const [pendingPermissionResolve, setPendingPermissionResolve] = useState<
     ((result: boolean) => void) | null
@@ -98,6 +93,10 @@ export default function HomeScreen() {
   const descRef = useRef<TextInput>(null);
   const passwordRef = useRef<TextInput>(null);
   const confirmRef = useRef<TextInput>(null);
+
+  // For DropDownPicker - fixed TypeScript issues
+  const [tagPickerOpen, setTagPickerOpen] = useState(false);
+  const [tagPickerItems, setTagPickerItems] = useState<TagType[]>(TAGS);
 
   // Custom BLE permission request (returns true if granted)
   async function requestBlePermissionsCustom(): Promise<boolean> {
@@ -150,20 +149,44 @@ export default function HomeScreen() {
     return true;
   }
 
+  // Load saved objects and setup status on initial load
   useEffect(() => {
     (async () => {
       const data = await AsyncStorage.getItem(STORAGE_KEY);
-      if (data) setObjects(JSON.parse(data));
+      if (data) {
+        const parsedObjects = JSON.parse(data);
+        setObjects(parsedObjects);
+
+        // If we already have 3 objects, setup is done
+        if (parsedObjects.length === 3) {
+          setSetupDone(true);
+        }
+      }
+
       const done = await AsyncStorage.getItem(SETUP_DONE_KEY);
-      setSetupDone(!!done);
+      if (done) {
+        setSetupDone(true);
+      }
     })();
   }, []);
 
+  // Request permissions after completing setup with 3 objects
   useEffect(() => {
-    if (objects.length === 3 && !setupDone) {
-      AsyncStorage.setItem(SETUP_DONE_KEY, "true");
-      setSetupDone(true);
-    }
+    const requestPermissionsAfterSetup = async () => {
+      if (objects.length === 3 && !setupDone) {
+        // Request permissions
+        const permsGranted = await requestBlePermissionsCustom();
+        if (permsGranted) {
+          await actuallyRequestPermissions();
+        }
+
+        // Mark setup as done
+        await AsyncStorage.setItem(SETUP_DONE_KEY, "true");
+        setSetupDone(true);
+      }
+    };
+
+    requestPermissionsAfterSetup();
   }, [objects, setupDone]);
 
   const getTagForDevice = (deviceId: string): string | null => {
@@ -275,52 +298,17 @@ export default function HomeScreen() {
     }, 100);
   };
 
-  if (!setupDone || objects.length < 3) {
+  // Handle showing the form when the user clicks "Add Object"
+  const handleShowForm = () => {
+    setShowForm(true);
+    resetForm();
+  };
+
+  // Setup process screen (adding objects)
+  if (!setupDone) {
     const availableTags = TAGS.filter(
       (tag) => !objects.find((obj) => obj.tag === tag.value)
     );
-
-    const showDevicePicker = async () => {
-      const permsGranted = await requestBlePermissionsCustom();
-      if (!permsGranted) return;
-      const perms = await actuallyRequestPermissions();
-      if (!perms) return;
-
-      setFoundDevices([]);
-      setDevicePickerVisible(true);
-      setPickerLoading(true);
-
-      let scanned: { [id: string]: Device } = {};
-      let timer: NodeJS.Timeout;
-
-      if (bleManager.current) {
-        bleManager.current.stopDeviceScan();
-      } else {
-        bleManager.current = new BleManager();
-      }
-
-      bleManager.current.startDeviceScan(
-        null,
-        { allowDuplicates: false },
-        (error, device) => {
-          if (error) {
-            setPickerLoading(false);
-            bleManager.current?.stopDeviceScan();
-            clearTimeout(timer);
-            return;
-          }
-          if (!device || !device.id) return;
-          if (typeof device.rssi === "number" && !scanned[device.id]) {
-            scanned[device.id] = device;
-            setFoundDevices((prev) => [...prev, device]);
-          }
-        }
-      );
-      timer = setTimeout(() => {
-        setPickerLoading(false);
-        bleManager.current?.stopDeviceScan();
-      }, 6000);
-    };
 
     const validate = () => {
       let err: { [key: string]: string } = {};
@@ -334,44 +322,32 @@ export default function HomeScreen() {
       return err;
     };
 
-    const onDevicePick = async (device: Device) => {
-      setDevicePickerVisible(false);
-      const deviceId = device.id;
-      if (selectedTag && selectedTag in TAG_MAC_PATTERNS) {
-        const pattern = deviceId.substring(0, 3);
-        // @ts-ignore
-        TAG_MAC_PATTERNS[selectedTag] = pattern;
-      }
+    const onConfirm = async () => {
+      const err = validate();
+      setErrors(err);
+      if (Object.keys(err).length > 0) return;
 
+      // Create a new object with a placeholder deviceId (we'll handle real BLE later)
       const obj: ObjectType = {
         name: name.trim(),
         description: description.trim(),
         tag: selectedTag!,
         password,
-        deviceId: deviceId,
+        deviceId: `placeholder-${Date.now()}`, // Placeholder deviceId
       };
 
       const updated = [...objects, obj];
       setObjects(updated);
       await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-      setModalMsg("Object added successfully!");
-      setModalVisible(true);
 
-      resetForm();
-      setShowForm(true);
-
-      setTimeout(() => setModalVisible(false), 1800);
+      // Show success modal
+      setSuccessModalVisible(true);
     };
 
-    const onConfirm = async () => {
-      const err = validate();
-      setErrors(err);
-      if (Object.keys(err).length > 0) return;
-      showDevicePicker();
-    };
+    const handleCloseSuccessModal = () => {
+      setSuccessModalVisible(false);
 
-    const handleShowForm = () => {
-      setShowForm(true);
+      // Reset form for next object
       resetForm();
     };
 
@@ -399,7 +375,6 @@ export default function HomeScreen() {
                 <TouchableOpacity
                   style={styles.addButton}
                   onPress={handleShowForm}
-                  disabled={objects.length >= 3}
                 >
                   <Text style={styles.addButtonText}>+ Add Object</Text>
                 </TouchableOpacity>
@@ -443,17 +418,14 @@ export default function HomeScreen() {
                 <Text style={styles.label}>
                   Assign Tag <Text style={{ color: "red" }}>*</Text>
                 </Text>
-                {/* --- Custom DropDownPicker for tags --- */}
+                {/* --- Fixed DropDownPicker --- */}
                 <View style={{ marginBottom: 10, zIndex: 10 }}>
                   <DropDownPicker
                     open={tagPickerOpen}
                     setOpen={setTagPickerOpen}
                     value={selectedTag}
                     setValue={setSelectedTag}
-                    items={availableTags.map((tag) => ({
-                      label: tag.label,
-                      value: tag.value,
-                    }))}
+                    items={availableTags}
                     setItems={setTagPickerItems}
                     placeholder="Select tag..."
                     style={{
@@ -544,12 +516,8 @@ export default function HomeScreen() {
                   <Text style={styles.err}>{errors.confirm}</Text>
                 )}
                 <TouchableOpacity
-                  style={[
-                    styles.confirmButton,
-                    objects.length >= 3 && { backgroundColor: "#ccc" },
-                  ]}
+                  style={styles.confirmButton}
                   onPress={onConfirm}
-                  disabled={objects.length >= 3}
                 >
                   <Text style={styles.confirmButtonText}>✔ Confirm Object</Text>
                 </TouchableOpacity>
@@ -561,7 +529,35 @@ export default function HomeScreen() {
             Search It, 2025. All Rights Reserved.
           </Text>
         </KeyboardAvoidingView>
-        {/* --- Custom white permission modal --- */}
+
+        {/* --- Success Modal --- */}
+        <Modal
+          visible={successModalVisible}
+          transparent={true}
+          animationType="fade"
+          onRequestClose={handleCloseSuccessModal}
+        >
+          <View style={styles.modalBg}>
+            <View style={styles.successModalContent}>
+              <View style={styles.successIconContainer}>
+                <Ionicons name="checkmark" size={28} color="#fff" />
+              </View>
+              <Text style={styles.successModalTitle}>Added Successfully</Text>
+              <Text style={styles.successModalText}>
+                You may now be able to perform search actions on this specific
+                object you've added.
+              </Text>
+              <TouchableOpacity
+                style={styles.successModalButton}
+                onPress={handleCloseSuccessModal}
+              >
+                <Text style={styles.successModalButtonText}>Close</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
+
+        {/* --- Custom permission modals --- */}
         <Modal
           visible={permissionModalVisible}
           transparent={true}
@@ -620,7 +616,8 @@ export default function HomeScreen() {
             </View>
           </View>
         </Modal>
-        {/* --- Custom white grant modal --- */}
+
+        {/* --- Custom grant modal --- */}
         <Modal
           visible={grantModalVisible}
           transparent={true}
@@ -679,93 +676,11 @@ export default function HomeScreen() {
             </View>
           </View>
         </Modal>
-        <Modal
-          visible={modalVisible}
-          transparent={true}
-          animationType="fade"
-          onRequestClose={() => setModalVisible(false)}
-        >
-          <View style={styles.modalBg}>
-            <View style={styles.modalContent}>
-              <Ionicons name="checkmark-circle" size={48} color="#247eff" />
-              <Text style={styles.modalText}>{modalMsg}</Text>
-            </View>
-          </View>
-        </Modal>
-        <Modal
-          visible={devicePickerVisible}
-          transparent={true}
-          animationType="slide"
-          onRequestClose={() => setDevicePickerVisible(false)}
-        >
-          <View style={styles.devicePickerBg}>
-            <View style={styles.devicePickerContainer}>
-              <Text style={styles.pickerTitle}>
-                Select the correct BLE device for this object
-              </Text>
-              {pickerLoading ? (
-                <Text style={styles.pickerLoading}>
-                  Scanning nearby devices...
-                </Text>
-              ) : foundDevices.length === 0 ? (
-                <Text style={styles.pickerLoading}>
-                  No devices found. Try again.
-                </Text>
-              ) : (
-                <FlatList
-                  data={foundDevices}
-                  keyExtractor={(item) => item.id}
-                  renderItem={({ item }) => (
-                    <TouchableOpacity
-                      style={styles.deviceItem}
-                      onPress={() => onDevicePick(item)}
-                    >
-                      <View style={{ flex: 1 }}>
-                        <Text style={{ fontWeight: "bold" }}>
-                          {item.name || item.localName || "Unnamed"}
-                        </Text>
-                        <Text style={{ fontSize: 13, color: "#666" }}>
-                          {item.id}
-                        </Text>
-                      </View>
-                      <Text style={{ fontWeight: "bold", color: "#247eff" }}>
-                        RSSI: {item.rssi}
-                      </Text>
-                    </TouchableOpacity>
-                  )}
-                  ListFooterComponent={
-                    <TouchableOpacity
-                      style={styles.rescanButton}
-                      onPress={() => {
-                        setFoundDevices([]);
-                        setPickerLoading(true);
-                        if (bleManager.current)
-                          bleManager.current.stopDeviceScan();
-                        showDevicePicker();
-                      }}
-                    >
-                      <Ionicons name="refresh" size={18} color="#247eff" />
-                      <Text style={{ color: "#247eff", marginLeft: 6 }}>
-                        Scan again
-                      </Text>
-                    </TouchableOpacity>
-                  }
-                />
-              )}
-              <TouchableOpacity
-                style={styles.cancelButton}
-                onPress={() => setDevicePickerVisible(false)}
-              >
-                <Text style={styles.cancelButtonText}>Cancel</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </Modal>
       </SafeAreaView>
     );
   }
 
-  // Main objects list screen
+  // Main objects list screen (when setup is done)
   return (
     <SafeAreaView style={styles.containerNoPad}>
       <ScrollView contentContainerStyle={{ flexGrow: 1 }}>
@@ -787,7 +702,7 @@ export default function HomeScreen() {
                   <Text style={styles.objectName}>{obj.name}</Text>
                   <Text style={styles.objectDesc}>{obj.description}</Text>
                   <Text style={styles.deviceIdLabel}>
-                    {obj.deviceId
+                    {obj.deviceId && !obj.deviceId.startsWith("placeholder")
                       ? `Device: ${obj.deviceId}`
                       : "No device assigned"}
                   </Text>
@@ -830,7 +745,8 @@ export default function HomeScreen() {
         <View style={{ flex: 1 }} />
         <Text style={styles.footer}>Search It, 2025. All Rights Reserved.</Text>
       </ScrollView>
-      {/* --- Custom white permission modal (for list screen if needed) --- */}
+
+      {/* --- Permission modals for main screen --- */}
       <Modal
         visible={permissionModalVisible}
         transparent={true}
@@ -886,7 +802,7 @@ export default function HomeScreen() {
           </View>
         </View>
       </Modal>
-      {/* --- Custom white grant modal (for list screen if needed) --- */}
+
       <Modal
         visible={grantModalVisible}
         transparent={true}
@@ -1114,10 +1030,12 @@ const styles = StyleSheet.create({
     borderColor: "#247eff",
     alignItems: "center",
   },
-  modalContent: {
+  // Success modal styles
+  successModalContent: {
     backgroundColor: "#fff",
     borderRadius: 14,
-    padding: 30,
+    padding: 24,
+    width: 300,
     alignItems: "center",
     elevation: 4,
     shadowColor: "#000",
@@ -1125,71 +1043,39 @@ const styles = StyleSheet.create({
     shadowRadius: 8,
     shadowOffset: { width: 0, height: 2 },
   },
-  modalText: {
-    marginTop: 18,
-    fontSize: 18,
-    color: "#247eff",
-    fontWeight: "bold",
-    textAlign: "center",
-  },
-  devicePickerBg: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.08)",
+  successIconContainer: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: "#247eff",
     justifyContent: "center",
     alignItems: "center",
+    marginBottom: 16,
   },
-  devicePickerContainer: {
-    backgroundColor: "#fff",
-    borderRadius: 16,
-    paddingVertical: 20,
-    paddingHorizontal: 16,
-    width: "85%",
-    maxHeight: "70%",
-    alignItems: "stretch",
-  },
-  pickerTitle: {
+  successModalTitle: {
+    fontSize: 20,
     fontWeight: "bold",
-    fontSize: 17,
     color: "#247eff",
-    marginBottom: 8,
+    marginBottom: 12,
+  },
+  successModalText: {
+    fontSize: 14,
+    color: "#555",
     textAlign: "center",
+    marginBottom: 20,
+    lineHeight: 20,
   },
-  pickerLoading: {
-    fontStyle: "italic",
-    color: "#888",
-    textAlign: "center",
-    marginVertical: 24,
-  },
-  deviceItem: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#f7faff",
+  successModalButton: {
+    backgroundColor: "#247eff",
+    paddingVertical: 12,
+    paddingHorizontal: 24,
     borderRadius: 8,
-    padding: 12,
-    marginBottom: 8,
-    borderColor: "#e1eaff",
-    borderWidth: 1,
+    width: "100%",
   },
-  rescanButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginTop: 16,
-    padding: 8,
-    alignSelf: "center",
-    backgroundColor: "#eef5ff",
-    borderRadius: 8,
-  },
-  cancelButton: {
-    marginTop: 10,
-    alignSelf: "center",
-    backgroundColor: "#eee",
-    borderRadius: 8,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-  },
-  cancelButtonText: {
-    color: "#888",
+  successModalButtonText: {
+    color: "#fff",
     fontWeight: "bold",
-    fontSize: 15,
+    fontSize: 16,
+    textAlign: "center",
   },
 });
