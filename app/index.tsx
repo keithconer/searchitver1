@@ -1,3 +1,5 @@
+"use client";
+
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useEffect, useRef, useState } from "react";
@@ -16,8 +18,12 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import { BleManager, State as BleState } from "react-native-ble-plx";
-import DropDownPicker, { ItemType } from "react-native-dropdown-picker";
+import {
+  BleManager,
+  State as BleState,
+  type Device,
+} from "react-native-ble-plx";
+import DropDownPicker, { type ItemType } from "react-native-dropdown-picker";
 import { SafeAreaView } from "react-native-safe-area-context";
 import SearchActions from "./search-actions";
 
@@ -30,17 +36,16 @@ const TAGS: TagType[] = [
   { label: "ESP32 CAM (Tag 3)", value: "tag3" },
 ];
 
-const TAG_MAC_PATTERNS = {
-  tag1: "6E:",
-  tag2: "33:",
-  tag3: "5E:",
-};
+// ESP32 BLE Configuration
+const ESP32_SERVICE_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
+const ESP32_CHARACTERISTIC_UUID = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E";
+const ESP32_DEVICE_NAME = "ESP32-Locator";
 
 const STORAGE_KEY = "@searchit_objects";
 const SETUP_DONE_KEY = "@searchit_setup_done";
 const PERMISSIONS_REQUESTED_KEY = "@searchit_permissions_requested";
 
-const getSignalIcon = (rssi: number | null, bluetoothOff: boolean = false) => {
+const getSignalIcon = (rssi: number | null, bluetoothOff = false) => {
   if (bluetoothOff || rssi === null)
     return { icon: "warning-outline", color: "#ff3b30", label: "n/a" };
   if (rssi >= -40)
@@ -87,6 +92,7 @@ export default function HomeScreen() {
     useState(false);
   const [showSearchActions, setShowSearchActions] = useState(false);
   const [pairedObject, setPairedObject] = useState<ObjectType | null>(null);
+  const [connectedDevice, setConnectedDevice] = useState<Device | null>(null);
 
   // States for authentication and editing
   const [authModalVisible, setAuthModalVisible] = useState(false);
@@ -107,6 +113,7 @@ export default function HomeScreen() {
   const [rssiMap, setRssiMap] = useState<{ [tag: string]: number | null }>({});
   const [bluetoothOff, setBluetoothOff] = useState(false);
   const bleManager = useRef<BleManager | null>(null);
+  const rssiInterval = useRef<NodeJS.Timeout | null>(null);
 
   // For permission modals
   const [permissionModalVisible, setPermissionModalVisible] = useState(false);
@@ -284,19 +291,7 @@ export default function HomeScreen() {
     requestPermissionsAfterSetup();
   }, [objects, setupDone, permissionsRequested]);
 
-  const getTagForDevice = (deviceId: string): string | null => {
-    const exactMatch = objects.find((obj) => obj.deviceId === deviceId);
-    if (exactMatch) {
-      return exactMatch.tag;
-    }
-    for (const [tag, pattern] of Object.entries(TAG_MAC_PATTERNS)) {
-      if (deviceId.startsWith(pattern)) {
-        return tag;
-      }
-    }
-    return null;
-  };
-
+  // Initialize BLE Manager
   useEffect(() => {
     if (!setupDone || objects.length < 3) return;
 
@@ -345,17 +340,18 @@ export default function HomeScreen() {
             return;
           }
 
-          if (!device || !device.id) return;
+          if (!device || !device.id || !device.name) return;
 
-          // Find which tag this device belongs to
-          const matchedTag = getTagForDevice(device.id);
-
-          if (matchedTag) {
-            // Only update RSSI for the specific tag this device is assigned to
-            setRssiMap((prev) => ({
-              ...prev,
-              [matchedTag]: device.rssi,
-            }));
+          // Look for ESP32-Locator devices
+          if (device.name === ESP32_DEVICE_NAME) {
+            // Update RSSI for all objects since we can't distinguish between tags yet
+            setRssiMap((prev) => {
+              const newMap = { ...prev };
+              objects.forEach((obj) => {
+                newMap[obj.tag] = device.rssi;
+              });
+              return newMap;
+            });
           }
         }
       );
@@ -382,6 +378,187 @@ export default function HomeScreen() {
       stateSubscription && stateSubscription.remove();
     };
   }, [setupDone, objects.length, objects, permissionsRequested]);
+
+  // Simplified Android-only permission request
+  async function requestAndroidBLEPermissions(): Promise<boolean> {
+    if (Platform.OS !== "android") return true;
+
+    try {
+      const permissions = [
+        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+        PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+        PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+      ];
+
+      const granted = await PermissionsAndroid.requestMultiple(permissions);
+
+      return Object.values(granted).every(
+        (status) => status === PermissionsAndroid.RESULTS.GRANTED
+      );
+    } catch (err) {
+      console.error("Permission request failed:", err);
+      return false;
+    }
+  }
+
+  // Real BLE pairing function - simplified for Android
+  const performRealBLEPairing = async (): Promise<boolean> => {
+    if (!bleManager.current || !selectedObjectForPairing) return false;
+
+    try {
+      // Request permissions first
+      const permissionsGranted = await requestAndroidBLEPermissions();
+      if (!permissionsGranted) {
+        console.log("BLE permissions not granted");
+        return false;
+      }
+
+      // Stop any existing scan
+      bleManager.current.stopDeviceScan();
+
+      return new Promise((resolve) => {
+        let foundDevice = false;
+
+        console.log("Starting BLE scan for ESP32-Locator...");
+
+        // Start scanning for ESP32 devices
+        bleManager.current!.startDeviceScan(
+          null,
+          null,
+          async (error, device) => {
+            if (error) {
+              console.log("Scan error:", error);
+              resolve(false);
+              return;
+            }
+
+            if (!device || foundDevice) return;
+
+            if (device.name) console.log(`Found device: ${device.name}`);
+
+            // Check if this is an ESP32-Locator device
+            if (device.name === ESP32_DEVICE_NAME) {
+              foundDevice = true;
+              bleManager.current!.stopDeviceScan();
+              console.log("ESP32-Locator found, attempting to connect...");
+
+              try {
+                // Connect to the device
+                const connectedDevice = await device.connect();
+                console.log("Connected to ESP32!");
+
+                // Discover services and characteristics
+                await connectedDevice.discoverAllServicesAndCharacteristics();
+                console.log("Services discovered!");
+
+                // Update the object with the real device ID
+                const updatedObjects = objects.map((obj) => {
+                  if (obj.tag === selectedObjectForPairing.tag) {
+                    return { ...obj, deviceId: device.id };
+                  }
+                  return obj;
+                });
+                setObjects(updatedObjects);
+                await AsyncStorage.setItem(
+                  STORAGE_KEY,
+                  JSON.stringify(updatedObjects)
+                );
+
+                // Set connected device for RSSI monitoring
+                setConnectedDevice(connectedDevice);
+
+                // Start RSSI monitoring with the object tag
+                startRSSIMonitoring(
+                  connectedDevice,
+                  selectedObjectForPairing.tag
+                );
+
+                // Listen for disconnection
+                device.onDisconnected(() => {
+                  console.log("ESP32 Disconnected!");
+                  handleDeviceDisconnection();
+                });
+
+                resolve(true);
+              } catch (connectError) {
+                console.log("Connection error:", connectError);
+                resolve(false);
+              }
+            }
+          }
+        );
+
+        // Timeout after 10 seconds
+        setTimeout(() => {
+          if (!foundDevice) {
+            console.log("Scan timed out, stopping scan.");
+            bleManager.current!.stopDeviceScan();
+            resolve(false);
+          }
+        }, 10000);
+      });
+    } catch (error) {
+      console.log("Pairing error:", error);
+      return false;
+    }
+  };
+
+  // Handle device disconnection
+  const handleDeviceDisconnection = () => {
+    stopRSSIMonitoring();
+    setConnectedDevice(null);
+    if (showSearchActions) {
+      setShowSearchActions(false);
+      setPairedObject(null);
+      // Could show a disconnection modal here
+    }
+  };
+
+  // Start RSSI monitoring for connected device
+  const startRSSIMonitoring = (device: Device, objectTag: string) => {
+    if (rssiInterval.current) {
+      clearInterval(rssiInterval.current);
+    }
+
+    rssiInterval.current = setInterval(async () => {
+      try {
+        const updatedDevice = await device.readRSSI();
+        const rssiValue = updatedDevice.rssi;
+
+        if (typeof rssiValue === "number") {
+          setRssiMap((prev) => ({
+            ...prev,
+            [objectTag]: rssiValue,
+          }));
+        }
+      } catch (error) {
+        console.log("RSSI read error:", error);
+        // Device might be disconnected
+        if (rssiInterval.current) {
+          clearInterval(rssiInterval.current);
+          rssiInterval.current = null;
+        }
+      }
+    }, 1000); // Update every second
+  };
+
+  // Stop RSSI monitoring
+  const stopRSSIMonitoring = () => {
+    if (rssiInterval.current) {
+      clearInterval(rssiInterval.current);
+      rssiInterval.current = null;
+    }
+  };
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      stopRSSIMonitoring();
+      if (connectedDevice) {
+        connectedDevice.cancelConnection().catch(console.log);
+      }
+    };
+  }, [connectedDevice]);
 
   // always reset all refs and their values after adding an object
   const resetForm = () => {
@@ -430,19 +607,27 @@ export default function HomeScreen() {
   };
 
   // Handle pair authentication submission
-  const handlePairAuthSubmit = () => {
+  const handlePairAuthSubmit = async () => {
     if (!selectedObjectForPairing) return;
 
     if (pairAuthPassword === selectedObjectForPairing.password) {
-      // Password correct, start scanning
+      // Password correct, start real BLE pairing
       setPairAuthModalVisible(false);
       setScanningModalVisible(true);
 
-      // Simulate scanning process
-      setTimeout(() => {
-        setScanningModalVisible(false);
+      // Perform real BLE pairing
+      const pairingSuccess = await performRealBLEPairing();
+
+      setScanningModalVisible(false);
+
+      if (pairingSuccess) {
         setPairedSuccessModalVisible(true);
-      }, 3000); // 3 seconds scanning simulation
+      } else {
+        // Handle pairing failure - could show an error modal
+        console.log("Pairing failed");
+        setSelectedObjectForPairing(null);
+        setShowPairButton(false);
+      }
     } else {
       // Password incorrect, show error modal
       setPairAuthModalVisible(false);
@@ -463,6 +648,13 @@ export default function HomeScreen() {
   const handleBackFromSearchActions = () => {
     setShowSearchActions(false);
     setPairedObject(null);
+    stopRSSIMonitoring();
+
+    // Disconnect from device
+    if (connectedDevice) {
+      connectedDevice.cancelConnection().catch(console.log);
+      setConnectedDevice(null);
+    }
   };
 
   // Handle authentication when clicking the 3-dot icon
@@ -506,7 +698,7 @@ export default function HomeScreen() {
     if (!selectedObject) return;
 
     // Validate edit form
-    let err: { [key: string]: string } = {};
+    const err: { [key: string]: string } = {};
     if (!editName.trim()) err.name = "Object name is required";
     if (editPassword && editPassword.length > 6)
       err.password = "Password must be 1-6 characters";
@@ -546,6 +738,7 @@ export default function HomeScreen() {
         object={pairedObject}
         rssi={rssiMap[pairedObject.tag]}
         onBack={handleBackFromSearchActions}
+        connectedDevice={connectedDevice}
       />
     );
   }
@@ -557,7 +750,7 @@ export default function HomeScreen() {
     );
 
     const validate = () => {
-      let err: { [key: string]: string } = {};
+      const err: { [key: string]: string } = {};
       if (!name.trim()) err.name = "Object name is required";
       if (!selectedTag) err.tag = "Tag is required";
       if (!password) err.password = "Password is required";
@@ -1025,6 +1218,7 @@ export default function HomeScreen() {
         <Text style={styles.footer}>Search It, 2025. All Rights Reserved.</Text>
       </ScrollView>
 
+      {/* All modals remain the same... */}
       {/* --- Pair Authentication Modal --- */}
       <Modal
         visible={pairAuthModalVisible}
@@ -1575,7 +1769,12 @@ const styles = StyleSheet.create({
     marginTop: 20,
     alignItems: "center",
   },
-  confirmButtonText: { color: "#fff", fontSize: 16, fontWeight: "bold" },
+  confirmButtonText: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "bold",
+    textAlign: "center",
+  },
   err: { color: "red", fontSize: 12, marginVertical: 2 },
   footer: {
     textAlign: "center",
