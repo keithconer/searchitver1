@@ -19,6 +19,7 @@ import {
 import { BleManager, State as BleState } from "react-native-ble-plx";
 import DropDownPicker, { ItemType } from "react-native-dropdown-picker";
 import { SafeAreaView } from "react-native-safe-area-context";
+import SearchActions from "./search-actions";
 
 // Define tag type to match DropDownPicker's ItemType
 type TagType = ItemType<string>;
@@ -74,6 +75,19 @@ export default function HomeScreen() {
   // This state controls whether to show the welcome screen or the form
   const [showForm, setShowForm] = useState(false);
 
+  // States for object selection and pairing
+  const [selectedObjectForPairing, setSelectedObjectForPairing] =
+    useState<ObjectType | null>(null);
+  const [showPairButton, setShowPairButton] = useState(false);
+  const [pairAuthModalVisible, setPairAuthModalVisible] = useState(false);
+  const [pairAuthPassword, setPairAuthPassword] = useState("");
+  const [pairAuthPasswordVisible, setPairAuthPasswordVisible] = useState(false);
+  const [scanningModalVisible, setScanningModalVisible] = useState(false);
+  const [pairedSuccessModalVisible, setPairedSuccessModalVisible] =
+    useState(false);
+  const [showSearchActions, setShowSearchActions] = useState(false);
+  const [pairedObject, setPairedObject] = useState<ObjectType | null>(null);
+
   // States for authentication and editing
   const [authModalVisible, setAuthModalVisible] = useState(false);
   const [incorrectPasswordModalVisible, setIncorrectPasswordModalVisible] =
@@ -112,6 +126,7 @@ export default function HomeScreen() {
   const passwordRef = useRef<TextInput>(null);
   const confirmRef = useRef<TextInput>(null);
   const authPasswordRef = useRef<TextInput>(null);
+  const pairAuthPasswordRef = useRef<TextInput>(null);
   const editNameRef = useRef<TextInput>(null);
   const editDescRef = useRef<TextInput>(null);
   const editPasswordRef = useRef<TextInput>(null);
@@ -389,6 +404,67 @@ export default function HomeScreen() {
     resetForm();
   };
 
+  // Handle object selection for pairing
+  const handleObjectSelect = (obj: ObjectType) => {
+    if (selectedObjectForPairing?.tag === obj.tag) {
+      // Deselect if already selected
+      setSelectedObjectForPairing(null);
+      setShowPairButton(false);
+    } else {
+      // Select new object
+      setSelectedObjectForPairing(obj);
+      setShowPairButton(true);
+    }
+  };
+
+  // Handle pair button click
+  const handlePairClick = () => {
+    if (!selectedObjectForPairing) return;
+
+    setPairAuthPassword("");
+    setPairAuthPasswordVisible(false);
+    setPairAuthModalVisible(true);
+    setTimeout(() => {
+      pairAuthPasswordRef.current?.focus();
+    }, 100);
+  };
+
+  // Handle pair authentication submission
+  const handlePairAuthSubmit = () => {
+    if (!selectedObjectForPairing) return;
+
+    if (pairAuthPassword === selectedObjectForPairing.password) {
+      // Password correct, start scanning
+      setPairAuthModalVisible(false);
+      setScanningModalVisible(true);
+
+      // Simulate scanning process
+      setTimeout(() => {
+        setScanningModalVisible(false);
+        setPairedSuccessModalVisible(true);
+      }, 3000); // 3 seconds scanning simulation
+    } else {
+      // Password incorrect, show error modal
+      setPairAuthModalVisible(false);
+      setIncorrectPasswordModalVisible(true);
+    }
+  };
+
+  // Handle successful pairing
+  const handlePairingSuccess = () => {
+    setPairedSuccessModalVisible(false);
+    setPairedObject(selectedObjectForPairing);
+    setShowSearchActions(true);
+    setSelectedObjectForPairing(null);
+    setShowPairButton(false);
+  };
+
+  // Handle back from search actions
+  const handleBackFromSearchActions = () => {
+    setShowSearchActions(false);
+    setPairedObject(null);
+  };
+
   // Handle authentication when clicking the 3-dot icon
   const handleAuthRequest = (obj: ObjectType) => {
     setSelectedObject(obj);
@@ -462,6 +538,17 @@ export default function HomeScreen() {
     setEditModalVisible(false);
     setSelectedObject(null);
   };
+
+  // If showing search actions, render that component
+  if (showSearchActions && pairedObject) {
+    return (
+      <SearchActions
+        object={pairedObject}
+        rssi={rssiMap[pairedObject.tag]}
+        onBack={handleBackFromSearchActions}
+      />
+    );
+  }
 
   // Setup process screen (adding objects)
   if (!setupDone) {
@@ -855,17 +942,29 @@ export default function HomeScreen() {
           {objects.map((obj, idx) => {
             const rssi = obj.tag in rssiMap ? rssiMap[obj.tag] : null;
             const signal = getSignalIcon(rssi, bluetoothOff);
+            const isSelected = selectedObjectForPairing?.tag === obj.tag;
+
             return (
               <View style={styles.objectItem} key={obj.tag}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.objectName}>{obj.name}</Text>
+                <TouchableOpacity
+                  style={{ flex: 1 }}
+                  onPress={() => handleObjectSelect(obj)}
+                >
+                  <Text
+                    style={[
+                      styles.objectName,
+                      isSelected && { color: "#247eff" },
+                    ]}
+                  >
+                    {obj.name}
+                  </Text>
                   <Text style={styles.objectDesc}>{obj.description}</Text>
                   <Text style={styles.deviceIdLabel}>
                     {obj.deviceId && !obj.deviceId.startsWith("placeholder")
                       ? `Device: ${obj.deviceId}`
                       : "No device assigned"}
                   </Text>
-                </View>
+                </TouchableOpacity>
                 <View style={styles.signalSection}>
                   <Text
                     style={[
@@ -903,9 +1002,133 @@ export default function HomeScreen() {
             );
           })}
         </View>
+
+        {/* Pair Button */}
+        {showPairButton && (
+          <View style={styles.pairButtonContainer}>
+            <TouchableOpacity
+              style={styles.pairButton}
+              onPress={handlePairClick}
+            >
+              <Ionicons
+                name="bluetooth"
+                size={20}
+                color="#fff"
+                style={{ marginRight: 8 }}
+              />
+              <Text style={styles.pairButtonText}>Pair Device</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
         <View style={{ flex: 1 }} />
         <Text style={styles.footer}>Search It, 2025. All Rights Reserved.</Text>
       </ScrollView>
+
+      {/* --- Pair Authentication Modal --- */}
+      <Modal
+        visible={pairAuthModalVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setPairAuthModalVisible(false)}
+      >
+        <View style={styles.modalBg}>
+          <View style={styles.authModalContent}>
+            <Ionicons
+              name="lock-closed"
+              size={32}
+              color="#247eff"
+              style={styles.authIcon}
+            />
+            <Text style={styles.authModalTitle}>Authentication</Text>
+            <Text style={styles.authModalText}>
+              kindly input your registered password on this specific tag
+            </Text>
+            <View style={styles.authPasswordField}>
+              <Pressable onPress={() => setPairAuthPasswordVisible((v) => !v)}>
+                <Ionicons
+                  name={pairAuthPasswordVisible ? "eye" : "eye-off"}
+                  size={18}
+                  color="#999"
+                />
+              </Pressable>
+              <TextInput
+                ref={pairAuthPasswordRef}
+                placeholder=""
+                placeholderTextColor="#888"
+                secureTextEntry={!pairAuthPasswordVisible}
+                style={styles.authPasswordInput}
+                value={pairAuthPassword}
+                onChangeText={setPairAuthPassword}
+                maxLength={6}
+              />
+            </View>
+            <TouchableOpacity
+              style={styles.authConfirmButton}
+              onPress={handlePairAuthSubmit}
+            >
+              <Text style={styles.authConfirmButtonText}>Confirm</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* --- Scanning Modal --- */}
+      <Modal
+        visible={scanningModalVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setScanningModalVisible(false)}
+      >
+        <View style={styles.modalBg}>
+          <View style={styles.scanningModalContent}>
+            <Ionicons
+              name="cellular"
+              size={40}
+              color="#247eff"
+              style={styles.scanningIcon}
+            />
+            <Text style={styles.scanningModalTitle}>Scanning</Text>
+            <Text style={styles.scanningModalText}>
+              for the microcontroller broadcast signal, please wait until the
+              scanning is done.
+            </Text>
+            <TouchableOpacity
+              style={styles.scanningCancelButton}
+              onPress={() => setScanningModalVisible(false)}
+            >
+              <Text style={styles.scanningCancelButtonText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* --- Paired Successfully Modal --- */}
+      <Modal
+        visible={pairedSuccessModalVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={handlePairingSuccess}
+      >
+        <View style={styles.modalBg}>
+          <View style={styles.successModalContent}>
+            <View style={styles.successIconContainer}>
+              <Ionicons name="checkmark" size={28} color="#fff" />
+            </View>
+            <Text style={styles.successModalTitle}>Paired Successfully</Text>
+            <Text style={styles.successModalText}>
+              You are now connected to the microcontroller. You may now be able
+              perform search actions.
+            </Text>
+            <TouchableOpacity
+              style={styles.successModalButton}
+              onPress={handlePairingSuccess}
+            >
+              <Text style={styles.successModalButtonText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
 
       {/* --- Authentication Modal --- */}
       <Modal
@@ -978,7 +1201,11 @@ export default function HomeScreen() {
               style={styles.authConfirmButton}
               onPress={() => {
                 setIncorrectPasswordModalVisible(false);
-                setAuthModalVisible(true);
+                if (selectedObject) {
+                  setAuthModalVisible(true);
+                } else {
+                  setPairAuthModalVisible(true);
+                }
               }}
             >
               <Text style={styles.authConfirmButtonText}>Try Again</Text>
@@ -1577,6 +1804,73 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   updateButtonText: {
+    color: "#fff",
+    fontWeight: "bold",
+    fontSize: 16,
+    textAlign: "center",
+  },
+
+  // Pair button styles
+  pairButtonContainer: {
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+  },
+  pairButton: {
+    backgroundColor: "#247eff",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 15,
+    borderRadius: 8,
+    elevation: 2,
+    shadowColor: "#000",
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  pairButtonText: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "bold",
+  },
+
+  // Scanning modal styles
+  scanningModalContent: {
+    backgroundColor: "#fff",
+    borderRadius: 14,
+    padding: 24,
+    width: 300,
+    alignItems: "center",
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  scanningIcon: {
+    marginBottom: 16,
+  },
+  scanningModalTitle: {
+    fontSize: 20,
+    fontWeight: "bold",
+    color: "#247eff",
+    marginBottom: 12,
+  },
+  scanningModalText: {
+    fontSize: 14,
+    color: "#555",
+    textAlign: "center",
+    marginBottom: 20,
+    lineHeight: 20,
+  },
+  scanningCancelButton: {
+    backgroundColor: "#247eff",
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    borderRadius: 8,
+    width: "100%",
+  },
+  scanningCancelButtonText: {
     color: "#fff",
     fontWeight: "bold",
     fontSize: 16,
