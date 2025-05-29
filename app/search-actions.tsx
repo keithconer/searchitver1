@@ -4,6 +4,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { useEffect, useRef, useState } from "react";
 import {
   Animated,
+  Image,
   Modal,
   StyleSheet,
   Text,
@@ -26,6 +27,7 @@ interface SearchActionsProps {
   rssi: number | null;
   onBack: () => void;
   connectedDevice: Device | null;
+  bluetoothOff?: boolean; // <-- Add this prop if you want to trigger disconnect modal from HomeScreen
 }
 
 const getSignalStrength = (rssi: number | null) => {
@@ -33,11 +35,20 @@ const getSignalStrength = (rssi: number | null) => {
   return `${rssi} dBm`;
 };
 
+const getSignalColor = (rssi: number | null) => {
+  if (rssi === null) return "#999";
+  if (rssi > -60) return "#00c853"; // Green
+  if (rssi > -75) return "#ffd600"; // Yellow
+  if (rssi > -90) return "#ff9100"; // Orange
+  return "#999";
+};
+
 export default function SearchActions({
   object,
   rssi,
   onBack,
   connectedDevice,
+  bluetoothOff = false,
 }: SearchActionsProps) {
   // Animation for blinking RSSI (for visual feedback if needed)
   const opacity = useRef(new Animated.Value(1)).current;
@@ -52,6 +63,11 @@ export default function SearchActions({
         const updatedDevice = await connectedDevice.readRSSI();
         const rssiValue = updatedDevice.rssi;
         if (typeof rssiValue === "number") setCurrentRssi(rssiValue);
+
+        // If RSSI is very weak or null, consider as disconnected
+        if (rssiValue === null || rssiValue < -90) {
+          setDisconnectModalVisible(true);
+        }
       } catch (error) {
         setDisconnectModalVisible(true);
       }
@@ -60,7 +76,12 @@ export default function SearchActions({
     return () => clearInterval(interval);
   }, [connectedDevice]);
 
-  // Optional: Animate RSSI value
+  // Show disconnect modal if bluetooth is off
+  useEffect(() => {
+    if (bluetoothOff) setDisconnectModalVisible(true);
+  }, [bluetoothOff]);
+
+  // Animate RSSI value
   useEffect(() => {
     const animation = Animated.loop(
       Animated.sequence([
@@ -89,20 +110,46 @@ export default function SearchActions({
     onBack();
   };
 
+  // Logo import path - adjust as needed!
+  let logoSrc;
+  try {
+    logoSrc = require("../../imgs/logo.png"); // For app/ folder
+  } catch (e) {
+    try {
+      logoSrc = require("@/imgs/logo.png"); // For expo-router alias
+    } catch (e) {
+      logoSrc = null;
+    }
+  }
+
   return (
     <SafeAreaView style={styles.container}>
-      {/* Centered Content */}
-      <View style={styles.centeredContent}>
+      {/* Logo & Heading */}
+      <View style={styles.topSection}>
+        {logoSrc && (
+          <Image source={logoSrc} style={styles.logo} resizeMode="contain" />
+        )}
         <Text style={styles.heading}>search it.</Text>
-        <Text style={styles.objectLine}>
-          <Text style={styles.objectName}>{object.name}</Text>
-          <Text style={styles.rssiText}>
-            {" "}
-            {currentRssi !== null
-              ? `[${getSignalStrength(currentRssi)}]`
-              : "[searching for signal...]"}
-          </Text>
-        </Text>
+      </View>
+
+      {/* Centered Object Name & Signal */}
+      <View style={styles.centeredContent}>
+        <Animated.Text style={[styles.objectName, { opacity }]}>
+          {object.name}
+        </Animated.Text>
+        <Animated.Text
+          style={[
+            styles.rssiText,
+            {
+              color: getSignalColor(currentRssi),
+              opacity,
+            },
+          ]}
+        >
+          {currentRssi !== null
+            ? getSignalStrength(currentRssi)
+            : "searching for signal..."}
+        </Animated.Text>
       </View>
 
       {/* Bottom Action Bar */}
@@ -111,14 +158,14 @@ export default function SearchActions({
           style={styles.actionButton}
           onPress={handleBuzzerPress}
         >
-          <Ionicons name="volume-high" size={30} color="#247eff" />
+          <Ionicons name="volume-high" size={32} color="#247eff" />
           <Text style={styles.actionLabel}>Buzzer</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.actionButton}
           onPress={handleLightPress}
         >
-          <Ionicons name="flash" size={30} color="#247eff" />
+          <Ionicons name="flash" size={32} color="#247eff" />
           <Text style={styles.actionLabel}>Light</Text>
         </TouchableOpacity>
       </View>
@@ -137,9 +184,9 @@ export default function SearchActions({
               Connection Lost
             </Text>
             <Text style={styles.modalText}>
-              You have been disconnected due to distance limitations, ensure you
-              are within the 10-15 meters distance away from the microcontroller
-              and keep the bluetooth on.
+              You have been disconnected due to distance limitations or
+              Bluetooth is off. Ensure you are within 10-15 meters from the
+              microcontroller and keep the Bluetooth on.
             </Text>
             <TouchableOpacity
               style={styles.modalButton}
@@ -160,33 +207,41 @@ const styles = StyleSheet.create({
     backgroundColor: "#fff",
     justifyContent: "space-between",
   },
+  topSection: {
+    alignItems: "center",
+    marginTop: 30,
+    marginBottom: 10,
+  },
+  logo: {
+    width: 80,
+    height: 80,
+    marginBottom: 0,
+  },
+  heading: {
+    fontSize: 32,
+    fontWeight: "bold",
+    color: "#247eff",
+    marginTop: 0,
+    marginBottom: 18,
+    fontFamily: "System",
+  },
   centeredContent: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
   },
-  heading: {
-    fontSize: 38,
-    fontWeight: "bold",
-    color: "#247eff",
-    marginBottom: 30,
-    fontFamily: "System",
-  },
-  objectLine: {
-    fontSize: 20,
-    textAlign: "center",
-    fontFamily: "System",
-  },
   objectName: {
     color: "#247eff",
     fontWeight: "bold",
-    fontSize: 20,
+    fontSize: 36,
+    marginBottom: 16,
+    textAlign: "center",
   },
   rssiText: {
-    color: "#222",
-    fontSize: 17,
-    fontFamily: "System",
-    fontWeight: "400",
+    fontSize: 30,
+    fontWeight: "bold",
+    textAlign: "center",
+    marginBottom: 10,
   },
   bottomBar: {
     flexDirection: "row",
@@ -204,7 +259,7 @@ const styles = StyleSheet.create({
   },
   actionLabel: {
     marginTop: 6,
-    fontSize: 15,
+    fontSize: 17,
     color: "#247eff",
     fontWeight: "600",
   },

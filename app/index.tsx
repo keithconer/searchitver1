@@ -740,6 +740,7 @@ export default function HomeScreen() {
         rssi={rssiMap[pairedObject.tag]}
         onBack={handleBackFromSearchActions}
         connectedDevice={connectedDevice}
+        bluetoothOff={bluetoothOff}
       />
     );
   }
