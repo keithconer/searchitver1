@@ -25,6 +25,7 @@ import {
 } from "react-native-ble-plx";
 import DropDownPicker, { type ItemType } from "react-native-dropdown-picker";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { getBleManager } from "../BleManagerSingleton";
 import SearchActions from "./search-actions";
 
 // Define tag type to match DropDownPicker's ItemType
@@ -295,7 +296,7 @@ export default function HomeScreen() {
   useEffect(() => {
     if (!setupDone || objects.length < 3) return;
 
-    bleManager.current = new BleManager();
+    bleManager.current = getBleManager();
     let scanActive = false;
 
     const stateSubscription = bleManager.current.onStateChange((state) => {
@@ -373,7 +374,7 @@ export default function HomeScreen() {
 
     return () => {
       bleManager.current && bleManager.current.stopDeviceScan();
-      bleManager.current && bleManager.current.destroy();
+      // Do NOT destroy here!
       appStateSubscription && appStateSubscription.remove();
       stateSubscription && stateSubscription.remove();
     };
