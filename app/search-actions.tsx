@@ -1,10 +1,9 @@
 "use client";
 
-import { Ionicons } from "@expo/vector-icons";
+import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useEffect, useRef, useState } from "react";
 import {
   Animated,
-  Image,
   Modal,
   StyleSheet,
   Text,
@@ -27,20 +26,32 @@ interface SearchActionsProps {
   rssi: number | null;
   onBack: () => void;
   connectedDevice: Device | null;
-  bluetoothOff?: boolean; // <-- Add this prop if you want to trigger disconnect modal from HomeScreen
+  bluetoothOff?: boolean;
 }
 
-const getSignalStrength = (rssi: number | null) => {
-  if (rssi === null) return "searching for signal...";
-  return `${rssi} dBm`;
+// Proximity helpers
+const getProximity = (rssi: number | null) => {
+  if (rssi === null) return "";
+  if (rssi >= -50) return "Super Near";
+  if (rssi >= -65) return "Near";
+  if (rssi >= -80) return "Far";
+  return "Super Far";
 };
 
 const getSignalColor = (rssi: number | null) => {
-  if (rssi === null) return "#999";
-  if (rssi > -60) return "#00c853"; // Green
-  if (rssi > -75) return "#ffd600"; // Yellow
-  if (rssi > -90) return "#ff9100"; // Orange
-  return "#999";
+  if (rssi === null) return "#bdbdbd"; // Grey
+  if (rssi >= -50) return "#00c853"; // Green
+  if (rssi >= -65) return "#ffd600"; // Yellow
+  if (rssi >= -80) return "#ff9100"; // Orange
+  return "#d32f2f"; // Red
+};
+
+const getSignalIcon = (rssi: number | null) => {
+  if (rssi === null) return "signal-off";
+  if (rssi >= -50) return "signal-cellular-3";
+  if (rssi >= -65) return "signal-cellular-2";
+  if (rssi >= -80) return "signal-cellular-1";
+  return "signal-cellular-outline";
 };
 
 export default function SearchActions({
@@ -50,7 +61,6 @@ export default function SearchActions({
   connectedDevice,
   bluetoothOff = false,
 }: SearchActionsProps) {
-  // Animation for blinking RSSI (for visual feedback if needed)
   const opacity = useRef(new Animated.Value(1)).current;
   const [currentRssi, setCurrentRssi] = useState(rssi);
   const [disconnectModalVisible, setDisconnectModalVisible] = useState(false);
@@ -64,7 +74,6 @@ export default function SearchActions({
         const rssiValue = updatedDevice.rssi;
         if (typeof rssiValue === "number") setCurrentRssi(rssiValue);
 
-        // If RSSI is very weak or null, consider as disconnected
         if (rssiValue === null || rssiValue < -90) {
           setDisconnectModalVisible(true);
         }
@@ -76,12 +85,10 @@ export default function SearchActions({
     return () => clearInterval(interval);
   }, [connectedDevice]);
 
-  // Show disconnect modal if bluetooth is off
   useEffect(() => {
     if (bluetoothOff) setDisconnectModalVisible(true);
   }, [bluetoothOff]);
 
-  // Animate RSSI value
   useEffect(() => {
     const animation = Animated.loop(
       Animated.sequence([
@@ -101,7 +108,6 @@ export default function SearchActions({
     return () => animation.stop();
   }, [opacity]);
 
-  // Placeholder for buzzer/light actions
   const handleBuzzerPress = async () => {};
   const handleLightPress = async () => {};
 
@@ -110,46 +116,44 @@ export default function SearchActions({
     onBack();
   };
 
-  // Logo import path - adjust as needed!
-  let logoSrc;
-  try {
-    logoSrc = require("../../imgs/logo.png"); // For app/ folder
-  } catch (e) {
-    try {
-      logoSrc = require("@/imgs/logo.png"); // For expo-router alias
-    } catch (e) {
-      logoSrc = null;
-    }
-  }
-
+  // Modern RSSI & Proximity UI
   return (
     <SafeAreaView style={styles.container}>
-      {/* Logo & Heading */}
-      <View style={styles.topSection}>
-        {logoSrc && (
-          <Image source={logoSrc} style={styles.logo} resizeMode="contain" />
-        )}
-        <Text style={styles.heading}>search it.</Text>
-      </View>
-
-      {/* Centered Object Name & Signal */}
       <View style={styles.centeredContent}>
-        <Animated.Text style={[styles.objectName, { opacity }]}>
-          {object.name}
-        </Animated.Text>
-        <Animated.Text
-          style={[
-            styles.rssiText,
-            {
-              color: getSignalColor(currentRssi),
-              opacity,
-            },
-          ]}
-        >
-          {currentRssi !== null
-            ? getSignalStrength(currentRssi)
-            : "searching for signal..."}
-        </Animated.Text>
+        <Text style={styles.objectName}>{object.name}</Text>
+        <View style={styles.signalRow}>
+          <MaterialCommunityIcons
+            name={getSignalIcon(currentRssi)}
+            size={54}
+            color={getSignalColor(currentRssi)}
+            style={{ marginRight: 10 }}
+          />
+          <View style={styles.signalTextColumn}>
+            <Animated.Text
+              style={[
+                styles.rssiText,
+                { color: getSignalColor(currentRssi), opacity },
+              ]}
+            >
+              {currentRssi !== null ? `${currentRssi} dBm` : "No Signal"}
+            </Animated.Text>
+            <View
+              style={[
+                styles.proximityPill,
+                { backgroundColor: getSignalColor(currentRssi) + "22" }, // faded background
+              ]}
+            >
+              <Text
+                style={[
+                  styles.proximityText,
+                  { color: getSignalColor(currentRssi) },
+                ]}
+              >
+                {getProximity(currentRssi)}
+              </Text>
+            </View>
+          </View>
+        </View>
       </View>
 
       {/* Bottom Action Bar */}
@@ -207,41 +211,53 @@ const styles = StyleSheet.create({
     backgroundColor: "#fff",
     justifyContent: "space-between",
   },
-  topSection: {
-    alignItems: "center",
-    marginTop: 30,
-    marginBottom: 10,
-  },
-  logo: {
-    width: 80,
-    height: 80,
-    marginBottom: 0,
-  },
-  heading: {
-    fontSize: 32,
-    fontWeight: "bold",
-    color: "#247eff",
-    marginTop: 0,
-    marginBottom: 18,
-    fontFamily: "System",
-  },
   centeredContent: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
   },
   objectName: {
-    color: "#247eff",
+    color: "#222",
     fontWeight: "bold",
-    fontSize: 36,
-    marginBottom: 16,
+    fontSize: 34,
+    marginBottom: 30,
     textAlign: "center",
+    letterSpacing: 0.5,
+  },
+  signalRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#f7f7f8",
+    borderRadius: 24,
+    paddingVertical: 18,
+    paddingHorizontal: 28,
+    elevation: 2,
+    shadowColor: "#000",
+    shadowOpacity: 0.07,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  signalTextColumn: {
+    alignItems: "flex-start",
+    justifyContent: "center",
   },
   rssiText: {
-    fontSize: 30,
+    fontSize: 28,
     fontWeight: "bold",
-    textAlign: "center",
-    marginBottom: 10,
+    marginBottom: 8,
+    letterSpacing: 0.5,
+  },
+  proximityPill: {
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    borderRadius: 999,
+    alignSelf: "flex-start",
+    marginTop: 2,
+  },
+  proximityText: {
+    fontSize: 17,
+    fontWeight: "600",
+    textTransform: "capitalize",
   },
   bottomBar: {
     flexDirection: "row",
@@ -263,7 +279,6 @@ const styles = StyleSheet.create({
     color: "#247eff",
     fontWeight: "600",
   },
-  // Modal styles
   modalOverlay: {
     flex: 1,
     backgroundColor: "rgba(0, 0, 0, 0.5)",
