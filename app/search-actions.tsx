@@ -32,7 +32,7 @@ interface SearchActionsProps {
 // Proximity helpers
 const getProximity = (rssi: number | null) => {
   if (rssi === null) return "";
-  if (rssi >= -50) return "Super Near";
+  if (rssi >= -55) return "Super Near";
   if (rssi >= -65) return "Near";
   if (rssi >= -80) return "Far";
   return "Super Far";
@@ -40,7 +40,7 @@ const getProximity = (rssi: number | null) => {
 
 const getSignalColor = (rssi: number | null) => {
   if (rssi === null) return "#bdbdbd"; // Grey
-  if (rssi >= -50) return "#00c853"; // Green
+  if (rssi >= -55) return "#00c853"; // Green
   if (rssi >= -65) return "#ffd600"; // Yellow
   if (rssi >= -80) return "#ff9100"; // Orange
   return "#d32f2f"; // Red
@@ -48,7 +48,7 @@ const getSignalColor = (rssi: number | null) => {
 
 const getSignalIcon = (rssi: number | null) => {
   if (rssi === null) return "signal-off";
-  if (rssi >= -50) return "signal-cellular-3";
+  if (rssi >= -55) return "signal-cellular-3";
   if (rssi >= -65) return "signal-cellular-2";
   if (rssi >= -80) return "signal-cellular-1";
   return "signal-cellular-outline";
