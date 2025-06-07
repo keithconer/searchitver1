@@ -47,13 +47,19 @@ const SETUP_DONE_KEY = "@searchit_setup_done";
 const PERMISSIONS_REQUESTED_KEY = "@searchit_permissions_requested";
 
 const getSignalIcon = (rssi: number | null, bluetoothOff = false) => {
-  if (bluetoothOff || rssi === null)
-    return { icon: "warning-outline", color: "#ff3b30", label: "n/a" };
-  if (rssi >= -40)
-    return { icon: "cellular", color: "#247eff", label: "very near" };
-  if (rssi >= -60)
-    return { icon: "cellular-outline", color: "#ffbb00", label: "far" };
-  return { icon: "cellular-outline", color: "#ffbb00", label: "far" };
+  if (bluetoothOff || rssi === null) {
+    return { icon: "warning-outline", color: "#d32f2f", label: "n/a" }; // Red for error
+  }
+  if (rssi >= -55) {
+    return { icon: "cellular", color: "#00c853", label: "Super Near" }; // Green
+  }
+  if (rssi >= -65) {
+    return { icon: "cellular-outline", color: "#ffd600", label: "Near" }; // Yellow
+  }
+  if (rssi >= -80) {
+    return { icon: "cellular-outline", color: "#ff9100", label: "Far" }; // Orange
+  }
+  return { icon: "cellular-outline", color: "#d32f2f", label: "Super Far" }; // Red
 };
 
 type ObjectType = {
