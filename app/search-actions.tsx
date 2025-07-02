@@ -275,7 +275,7 @@ const styles = StyleSheet.create({
   },
   actionLabel: {
     marginTop: 6,
-    fontSize: 17,
+    fontSize: 12,
     color: "#247eff",
     fontWeight: "600",
   },
