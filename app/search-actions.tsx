@@ -1,8 +1,10 @@
 "use client";
 
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
+import { Buffer } from "buffer"; // add this import and make sure 'buffer' is installed
 import { useEffect, useRef, useState } from "react";
 import {
+  Alert,
   Animated,
   Modal,
   StyleSheet,
@@ -28,6 +30,11 @@ interface SearchActionsProps {
   connectedDevice: Device | null;
   bluetoothOff?: boolean;
 }
+
+// BLE Service and Characteristic UUIDs
+const SERVICE_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
+const CHARACTERISTIC_UUID = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E";
+const WRITE_CHARACTERISTIC_UUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E";
 
 // Proximity helpers
 const getProximity = (rssi: number | null) => {
@@ -64,6 +71,8 @@ export default function SearchActions({
   const opacity = useRef(new Animated.Value(1)).current;
   const [currentRssi, setCurrentRssi] = useState(rssi);
   const [disconnectModalVisible, setDisconnectModalVisible] = useState(false);
+  const [buzzerState, setBuzzerState] = useState(false);
+  const [buzzerLoading, setBuzzerLoading] = useState(false);
 
   // Real-time RSSI monitoring (1s interval)
   useEffect(() => {
@@ -108,11 +117,85 @@ export default function SearchActions({
     return () => animation.stop();
   }, [opacity]);
 
-  const handleBuzzerPress = async () => {};
-  const handleLightPress = async () => {};
+  // Set up notification listener for buzzer responses
+  useEffect(() => {
+    if (!connectedDevice) return;
+
+    const setupNotifications = async () => {
+      try {
+        await connectedDevice.monitorCharacteristicForService(
+          SERVICE_UUID,
+          CHARACTERISTIC_UUID,
+          (error, characteristic) => {
+            if (error) {
+              console.log("Notification error:", error);
+              return;
+            }
+
+            if (characteristic?.value) {
+              const response = Buffer.from(
+                characteristic.value,
+                "base64"
+              ).toString("utf8");
+              console.log("Received response:", response);
+
+              if (response === "BUZZER_ON") {
+                setBuzzerState(true);
+                setBuzzerLoading(false);
+              } else if (response === "BUZZER_OFF") {
+                setBuzzerState(false);
+                setBuzzerLoading(false);
+              }
+            }
+          }
+        );
+      } catch (error) {
+        console.log("Failed to setup notifications:", error);
+      }
+    };
+
+    setupNotifications();
+  }, [connectedDevice]);
+
+  // BLE command sender for buzzer
+  const handleBuzzerPress = async () => {
+    if (!connectedDevice) {
+      Alert.alert("Error", "Device not connected");
+      return;
+    }
+
+    setBuzzerLoading(true);
+
+    try {
+      const command = "BUZZ_TOGGLE";
+      const base64Command = Buffer.from(command, "utf8").toString("base64");
+
+      await connectedDevice.writeCharacteristicWithResponseForService(
+        SERVICE_UUID,
+        WRITE_CHARACTERISTIC_UUID,
+        base64Command
+      );
+
+      // Loading state will be cleared by the notification response
+      // Set a timeout as fallback
+      setTimeout(() => {
+        setBuzzerLoading(false);
+      }, 3000);
+    } catch (error) {
+      console.log("Buzzer error:", error);
+      setBuzzerLoading(false);
+      Alert.alert("Error", "Failed to control buzzer");
+    }
+  };
+
+  // Placeholder for light button
+  const handleLightPress = async () => {
+    Alert.alert("Light Control", "Light control not implemented yet");
+  };
 
   const handleDisconnectModalClose = () => {
     setDisconnectModalVisible(false);
+    setBuzzerState(false); // Reset buzzer state when disconnecting
     onBack();
   };
 
@@ -159,11 +242,36 @@ export default function SearchActions({
       {/* Bottom Action Bar */}
       <View style={styles.bottomBar}>
         <TouchableOpacity
-          style={styles.actionButton}
+          style={[
+            styles.actionButton,
+            buzzerState && styles.actionButtonActive,
+          ]}
           onPress={handleBuzzerPress}
+          disabled={buzzerLoading}
         >
-          <Ionicons name="volume-high" size={32} color="#247eff" />
-          <Text style={styles.actionLabel}>Buzzer</Text>
+          {buzzerLoading ? (
+            <Animated.View style={{ opacity }}>
+              <Ionicons name="volume-high" size={32} color="#247eff" />
+            </Animated.View>
+          ) : (
+            <Ionicons
+              name={buzzerState ? "volume-high" : "volume-medium"}
+              size={32}
+              color={buzzerState ? "#ff4444" : "#247eff"}
+            />
+          )}
+          <Text
+            style={[
+              styles.actionLabel,
+              { color: buzzerState ? "#ff4444" : "#247eff" },
+            ]}
+          >
+            {buzzerLoading
+              ? "Loading..."
+              : buzzerState
+              ? "Buzzer ON"
+              : "Buzzer"}
+          </Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.actionButton}
@@ -272,11 +380,15 @@ const styles = StyleSheet.create({
   actionButton: {
     alignItems: "center",
     flex: 1,
+    paddingVertical: 8,
+    borderRadius: 12,
+  },
+  actionButtonActive: {
+    backgroundColor: "#ffebee",
   },
   actionLabel: {
     marginTop: 6,
     fontSize: 12,
-    color: "#247eff",
     fontWeight: "600",
   },
   modalOverlay: {
